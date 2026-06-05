@@ -174,6 +174,59 @@ enum LogFormat {
     Json,
 }
 
+// ============================================================
+// Progress-aware logging infrastructure
+// ============================================================
+
+/// Global MultiProgress instance shared between logging and progress bars.
+/// When progress bars are active, log messages are rendered above them via
+/// MultiProgress::println(), preventing display corruption.
+static GLOBAL_MP: std::sync::LazyLock<MultiProgress> =
+    std::sync::LazyLock::new(MultiProgress::new);
+
+/// Tracks whether any progress bars are currently active on GLOBAL_MP.
+/// When true, MpWriter routes through MultiProgress::println() (which draws
+/// above active bars). When false, MpWriter writes directly to stderr
+/// (because MultiProgress::println() is a no-op without active bars).
+static BARS_ACTIVE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Custom writer that routes tracing output intelligently:
+/// - Progress bars active → MultiProgress::println() (renders above bars)
+/// - No progress bars → direct stderr (MultiProgress::println is a no-op)
+struct MpWriter {
+    buf: Vec<u8>,
+}
+
+impl std::io::Write for MpWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.buf.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        if !self.buf.is_empty() {
+            let s = String::from_utf8_lossy(&self.buf);
+            let s = s.trim_end_matches('\n');
+            if !s.is_empty() {
+                if BARS_ACTIVE.load(std::sync::atomic::Ordering::Relaxed) {
+                    let _ = GLOBAL_MP.println(s);
+                } else {
+                    eprintln!("{}", s);
+                }
+            }
+            self.buf.clear();
+        }
+        Ok(())
+    }
+}
+
+impl Drop for MpWriter {
+    fn drop(&mut self) {
+        let _ = self.flush();
+    }
+}
+
 // Must be pub for submodules
 #[derive(Debug, Deserialize)]
 pub struct Config {
@@ -516,11 +569,14 @@ fn setup_logging(output_dir: &Path, log_level: &str, format: &LogFormat, accessi
         stdout_filter = stdout_filter.add_directive(directive);
     }
 
+    // stdout layer writes through MpWriter so that log messages are rendered
+    // above active progress bars via MultiProgress::println(), preventing
+    // display corruption when progress bars and logs share the terminal.
     match format {
         LogFormat::Json => {
             let json_layer = fmt::layer()
                 .json()
-                .with_writer(std::io::stdout)
+                .with_writer(|| MpWriter { buf: Vec::new() })
                 .with_timer(fmt::time::LocalTime::rfc_3339())
                 .flatten_event(true)
                 .with_target(false)
@@ -531,8 +587,8 @@ fn setup_logging(output_dir: &Path, log_level: &str, format: &LogFormat, accessi
         }
         LogFormat::Text => {
             let stdout_layer = fmt::layer()
-                .with_writer(std::io::stdout)
-                .with_ansi(true)
+                .with_writer(|| MpWriter { buf: Vec::new() })
+                .with_ansi(false)
                 .with_target(false)
                 .with_thread_ids(false)
                 .with_timer(LocalTimer)
@@ -759,7 +815,8 @@ async fn download_with_aws(records: &[ProcessedRecord], config: &Config, args: &
     info!("⚙️  Config: Parallel Files = {}, Threads/File = {}, Chunk Size = {}MB", file_concurrency, chunk_concurrency, chunk_size_mb);
 
     let semaphore = Arc::new(Semaphore::new(file_concurrency));
-    let mp = Arc::new(MultiProgress::new());
+    let mp = Arc::new(GLOBAL_MP.clone());
+    BARS_ACTIVE.store(true, std::sync::atomic::Ordering::Relaxed);
     let mut handles = Vec::new();
 
     let fasterq_dump_path = config.software.fasterq_dump.display().to_string();
@@ -869,6 +926,7 @@ async fn download_with_aws(records: &[ProcessedRecord], config: &Config, args: &
     for handle in handles {
         if let Err(e) = handle.await { warn!("Task error: {}", e); }
     }
+    BARS_ACTIVE.store(false, std::sync::atomic::Ordering::Relaxed);
     info!("🎉 All AWS S3 tasks completed");
     Ok(())
 }
