@@ -33,8 +33,12 @@ pub async fn process_downloads(
     let mp = Arc::new(MultiProgress::new());
     let mut handles = Vec::new();
 
-    let ascp_bin = config.software.ascp.display().to_string();
-    let ssh_key = config.setting.openssh.display().to_string();
+    let ascp_bin = config.software.ascp.as_ref()
+        .ok_or_else(|| anyhow!("ascp path not configured"))?
+        .display().to_string();
+    let ssh_key = config.setting.openssh.as_ref()
+        .ok_or_else(|| anyhow!("Aspera openssh key not configured"))?
+        .display().to_string();
 
     struct Task {
         url: String,

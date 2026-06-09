@@ -13,12 +13,8 @@ interface EnaRecord {
 
 interface Config {
   software: {
-    ascp: string;
     prefetch: string;
     fasterq_dump: string;
-  };
-  setting: {
-    openssh: string;
   };
 }
 
@@ -47,7 +43,7 @@ function App() {
     accession: '',
     tsv: '',
     output: '',
-    method: 'Aws' as 'Ascp' | 'Ftp' | 'Prefetch' | 'Aws' | 'Auto',
+    method: 'Aws' as 'Ftp' | 'Prefetch' | 'Aws' | 'Auto',
     multithreads: 4,
     awsThreads: 8,
     chunkSize: 20,
@@ -70,10 +66,8 @@ function App() {
 
   // Config form state
   const [configForm, setConfigForm] = useState({
-    ascpPath: '',
     prefetchPath: '',
     fasterqDumpPath: '',
-    opensshPath: '',
   });
 
   // Load config on startup
@@ -103,10 +97,8 @@ function App() {
       if (result) {
         setConfig(result);
         setConfigForm({
-          ascpPath: result.software.ascp,
           prefetchPath: result.software.prefetch,
           fasterqDumpPath: result.software.fasterq_dump,
-          opensshPath: result.setting.openssh,
         });
       }
     } catch (e) {
@@ -260,10 +252,8 @@ function App() {
     try {
       await invoke('save_config_command', {
         config: {
-          ascpPath: configForm.ascpPath,
           prefetchPath: configForm.prefetchPath,
           fasterqDumpPath: configForm.fasterqDumpPath,
-          opensshPath: configForm.opensshPath,
         },
       });
       addLog('info', 'Config saved successfully');
@@ -442,7 +432,6 @@ function DownloadTab({
             disabled={isDownloading}
           >
             <option value="Aws">AWS S3 (Fastest)</option>
-            <option value="Ascp">Aspera</option>
             <option value="Ftp">FTP</option>
             <option value="Prefetch">Prefetch</option>
             <option value="Auto">Auto (AWS with fallback)</option>
@@ -734,19 +723,6 @@ function SettingsTab({
   return (
     <div className="settings-tab">
       <div className="form-group">
-        <label>Aspera (ascp) Path</label>
-        <div className="file-input">
-          <input
-            type="text"
-            value={form.ascpPath}
-            onChange={(e) => setForm((prev: any) => ({ ...prev, ascpPath: e.target.value }))}
-            placeholder="/path/to/ascp"
-          />
-          <button onClick={createFileSelector('ascpPath')}>Browse</button>
-        </div>
-      </div>
-
-      <div className="form-group">
         <label>Prefetch Path</label>
         <div className="file-input">
           <input
@@ -769,19 +745,6 @@ function SettingsTab({
             placeholder="/path/to/fasterq-dump"
           />
           <button onClick={createFileSelector('fasterqDumpPath')}>Browse</button>
-        </div>
-      </div>
-
-      <div className="form-group">
-        <label>Aspera OpenSSH Key</label>
-        <div className="file-input">
-          <input
-            type="text"
-            value={form.opensshPath}
-            onChange={(e) => setForm((prev: any) => ({ ...prev, opensshPath: e.target.value }))}
-            placeholder="/path/to/asperaweb_id_dsa.openssh"
-          />
-          <button onClick={createFileSelector('opensshPath')}>Browse</button>
         </div>
       </div>
 

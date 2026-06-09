@@ -19,14 +19,14 @@ pub struct Config {
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct SoftwarePaths {
-    pub ascp: PathBuf,
+    pub ascp: Option<PathBuf>,
     pub prefetch: PathBuf,
     pub fasterq_dump: PathBuf,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct SettingPaths {
-    pub openssh: PathBuf,
+    pub openssh: Option<PathBuf>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -296,8 +296,12 @@ pub fn validate_config(config: &Config, method: DownloadMethod) -> Result<()> {
     check_pigz_dependency()?;
     match method {
         DownloadMethod::Ascp => {
-            check_executable(&config.software.ascp, "ascp")?;
-            check_file_exists(&config.setting.openssh, "Aspera openssh key")?;
+            let ascp = config.software.ascp.as_ref()
+                .ok_or_else(|| anyhow!("ascp path not configured"))?;
+            let openssh = config.setting.openssh.as_ref()
+                .ok_or_else(|| anyhow!("Aspera openssh key not configured"))?;
+            check_executable(ascp, "ascp")?;
+            check_file_exists(openssh, "Aspera openssh key")?;
         }
         DownloadMethod::Prefetch => {
             check_executable(&config.software.prefetch, "prefetch")?;

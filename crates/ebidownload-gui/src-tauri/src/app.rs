@@ -102,12 +102,12 @@ pub async fn save_config_command(
 
     let yaml_config = serde_yaml::to_string(&serde_json::json!({
         "software": {
-            "ascp": config.ascp_path,
+            "ascp": "",
             "prefetch": config.prefetch_path,
             "fasterq_dump": config.fasterq_dump_path,
         },
         "setting": {
-            "openssh": config.openssh_path,
+            "openssh": "",
         }
     }))
     .map_err(|e| format!("Failed to serialize config: {}", e))?;
@@ -125,10 +125,8 @@ pub async fn save_config_command(
 
 #[derive(Debug, Deserialize)]
 pub struct ConfigInput {
-    pub ascp_path: String,
     pub prefetch_path: String,
     pub fasterq_dump_path: String,
-    pub openssh_path: String,
 }
 
 #[::tauri::command]
