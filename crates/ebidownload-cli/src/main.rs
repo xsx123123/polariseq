@@ -17,11 +17,7 @@ use tracing::{info, warn, error};
 use tracing_subscriber::{fmt, EnvFilter};
 use std::time::Duration;
 
-mod aws_s3;
-mod ftp;
-mod prefetch;
-mod progress;
-mod upload;
+use ebidownload_core::*;
 
 const VERSION: &str = "1.3.7";
 const SCRIPT_NAME: &str = "EBIDownload";
@@ -161,15 +157,6 @@ struct UploadArgs {
 // ============================================================
 
 #[derive(Debug, Clone, clap::ValueEnum)]
-enum DownloadMethod {
-    Ascp,
-    Ftp,
-    Prefetch,
-    Aws,
-    Auto,
-}
-
-#[derive(Debug, Clone, clap::ValueEnum)]
 enum LogFormat {
     Text,
     Json,
@@ -228,99 +215,7 @@ impl Drop for MpWriter {
     }
 }
 
-// Must be pub for submodules
-#[derive(Debug, Deserialize)]
-pub struct Config {
-    #[allow(dead_code)]
-    pub software: SoftwarePaths,
-    pub setting: SettingPaths,
-}
 
-#[derive(Debug, Deserialize)]
-#[allow(dead_code)]
-pub struct SoftwarePaths {
-    pub ascp: PathBuf,
-    pub prefetch: PathBuf,
-    pub fasterq_dump: PathBuf,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct SettingPaths {
-    pub openssh: PathBuf,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct EnaRecord {
-    run_accession: String,
-    study_accession: Option<String>,
-    secondary_study_accession: Option<String>,
-    sample_accession: Option<String>,
-    secondary_sample_accession: Option<String>,
-    experiment_accession: Option<String>,
-    submission_accession: Option<String>,
-    tax_id: Option<String>,
-    scientific_name: Option<String>,
-    instrument_platform: Option<String>,
-    instrument_model: Option<String>,
-    library_name: Option<String>,
-    nominal_length: Option<String>,
-    library_layout: Option<String>,
-    library_strategy: Option<String>,
-    library_source: Option<String>,
-    library_selection: Option<String>,
-    read_count: Option<String>,
-    center_name: Option<String>,
-    first_public: Option<String>,
-    last_updated: Option<String>,
-    experiment_title: Option<String>,
-    study_title: Option<String>,
-    study_alias: Option<String>,
-    run_alias: Option<String>,
-    #[serde(default)]
-    fastq_bytes: String,
-    #[serde(default)]
-    fastq_md5: String,
-    #[serde(default)]
-    fastq_ftp: String,
-    fastq_aspera: Option<String>,
-    fastq_galaxy: Option<String>,
-    submitted_bytes: Option<String>,
-    submitted_md5: Option<String>,
-    submitted_ftp: Option<String>,
-    submitted_aspera: Option<String>,
-    submitted_galaxy: Option<String>,
-    submitted_format: Option<String>,
-    sra_bytes: Option<String>,
-    sra_md5: Option<String>,
-    sra_ftp: Option<String>,
-    sra_aspera: Option<String>,
-    sra_galaxy: Option<String>,
-    sample_alias: Option<String>,
-    #[serde(default)]
-    sample_title: String,
-    nominal_sdev: Option<String>,
-    first_created: Option<String>,
-    bam_ftp: Option<String>,
-    fastq_file_role: Option<String>,
-    submitted_file_role: Option<String>,
-    sra_file_role: Option<String>,
-}
-
-// Must be pub
-#[derive(Debug)]
-pub struct ProcessedRecord {
-    pub run_accession: String,
-    pub fastq_ftp_1_url: String,
-    pub fastq_ftp_2_url: Option<String>,
-    pub fastq_ftp_1_name: String,
-    pub fastq_ftp_2_name: Option<String>,
-    pub fastq_md5_1: String,
-    pub fastq_md5_2: Option<String>,
-    // 🟢 Added: Store parsed file size
-    pub fastq_bytes_1: u64,
-    pub fastq_bytes_2: Option<u64>,
-    pub sample_title: String,
-}
 
 struct RegexFilters {
     include_sample: Vec<Regex>,
@@ -405,7 +300,7 @@ async fn main() -> ExitCode {
     let result: Result<()> = async {
         match &cli.command {
             Commands::Download(args) => {
-                check_pigz_dependency().context("pigz dependency check failed")?;
+                ebidownload_core::check_pigz_dependency().context("pigz dependency check failed")?;
                 run_download(args, &cli).await
             }
             Commands::Upload(args) => {
@@ -453,7 +348,7 @@ async fn run_download(args: &DownloadArgs, cli: &Cli) -> Result<()> {
 
     save_metadata_tsv(&filtered_records, &args.output, args.accession.as_deref())?;
 
-    let processed = process_records(filtered_records, args)?;
+    let processed = process_records(filtered_records, args.pe_only)?;
     save_md5_files(&processed, &args.output, args.accession.as_deref())?;
 
     if args.dry_run {
@@ -472,25 +367,25 @@ async fn run_download(args: &DownloadArgs, cli: &Cli) -> Result<()> {
 
     match args.download {
         DownloadMethod::Ascp => {
-            check_ascp_config(&config)?;
+            validate_config(&config, DownloadMethod::Ascp)?;
             download_with_ascp(&processed, &config, args).await?;
         }
         DownloadMethod::Ftp => {
             download_with_ftp(&processed, &config, args).await?;
         }
         DownloadMethod::Prefetch => {
-            check_prefetch_config(&config)?;
-            check_fasterq_dump_config(&config)?;
+            validate_config(&config, DownloadMethod::Prefetch)?;
+            validate_config(&config, DownloadMethod::Aws)?;
             download_with_prefetch(&processed, &config, args).await?;
         }
         DownloadMethod::Aws => {
-            check_fasterq_dump_config(&config)?;
+            validate_config(&config, DownloadMethod::Aws)?;
             download_with_aws(&processed, &config, args).await?;
         }
         DownloadMethod::Auto => {
             info!("🤖 Auto Mode: Attempting AWS S3 first...");
-            check_fasterq_dump_config(&config)?;
-            check_prefetch_config(&config)?;
+            validate_config(&config, DownloadMethod::Aws)?;
+            validate_config(&config, DownloadMethod::Prefetch)?;
             // Note: In a full production system, we would track individual file failures.
             // Here we attempt AWS. If it completes, great.
             // If the entire batch fails (e.g. API error), we catch it and try Prefetch.
@@ -510,7 +405,7 @@ async fn run_download(args: &DownloadArgs, cli: &Cli) -> Result<()> {
 // ============================================================
 
 async fn run_upload(args: &UploadArgs) -> Result<()> {
-    upload::run_upload(
+    ebidownload_core::upload::run_upload(
         &args.bucket,
         &args.prefix,
         &args.files,
@@ -605,42 +500,6 @@ fn setup_logging(output_dir: &Path, log_level: &str, format: &LogFormat, accessi
     Ok(())
 }
 
-fn load_config(yaml_path: &Path) -> Result<Config> {
-    if !yaml_path.exists() { return Err(anyhow!("YAML configuration file not found: {}", yaml_path.display())); }
-    info!("⚙️  Loading configuration from: {}", yaml_path.display());
-    let content = fs::read_to_string(yaml_path)?;
-    let config: Config = serde_yaml::from_str(&content)?;
-    info!("✅ Configuration loaded successfully");
-    Ok(config)
-}
-
-async fn fetch_ena_data(accession: &str) -> Result<Vec<EnaRecord>> {
-    let fields = "run_accession,study_accession,secondary_study_accession,sample_accession,secondary_sample_accession,experiment_accession,submission_accession,tax_id,scientific_name,instrument_platform,instrument_model,library_name,nominal_length,library_layout,library_strategy,library_source,library_selection,read_count,center_name,first_public,last_updated,experiment_title,study_title,study_alias,run_alias,fastq_bytes,fastq_md5,fastq_ftp,fastq_aspera,fastq_galaxy,submitted_bytes,submitted_md5,submitted_ftp,submitted_aspera,submitted_galaxy,submitted_format,sra_bytes,sra_md5,sra_ftp,sra_aspera,sra_galaxy,sample_alias,sample_title,nominal_sdev,first_created,bam_ftp,fastq_file_role,submitted_file_role,sra_file_role";
-    let url = format!("https://www.ebi.ac.uk/ena/portal/api/filereport?accession={}&result=read_run&fields={}&format=tsv", accession, fields);
-    info!("🌐 Fetching data from ENA API for: {}", accession);
-
-    let client = reqwest::Client::builder()
-        .build()?;
-
-    let response = client.get(&url).send().await.context("Failed to fetch data from ENA API")?;
-    if !response.status().is_success() { return Err(anyhow!("Failed to get response. Status code: {}", response.status())); }
-    let text = response.text().await?;
-    let mut reader = ReaderBuilder::new().has_headers(true).delimiter(b'\t').from_reader(text.as_bytes());
-    let mut records = Vec::new();
-    for result in reader.deserialize() { let record: EnaRecord = result?; records.push(record); }
-    info!("✅ Fetched {} records from ENA", records.len());
-    Ok(records)
-}
-
-fn read_tsv_data(tsv_path: &Path) -> Result<Vec<EnaRecord>> {
-    info!("📄 Reading TSV file: {}", tsv_path.display());
-    let mut reader = ReaderBuilder::new().has_headers(true).delimiter(b'\t').from_path(tsv_path)?;
-    let mut records = Vec::new();
-    for result in reader.deserialize() { let record: EnaRecord = result?; records.push(record); }
-    info!("✅ Read {} records from TSV", records.len());
-    Ok(records)
-}
-
 fn apply_filters(records: Vec<EnaRecord>, filters: &RegexFilters) -> Result<Vec<EnaRecord>> {
     let mut filtered = Vec::new();
     let mut filtered_count = 0;
@@ -649,61 +508,6 @@ fn apply_filters(records: Vec<EnaRecord>, filters: &RegexFilters) -> Result<Vec<
     }
     if filtered_count > 0 { info!("🔍 Filtered out {} records based on regex patterns", filtered_count); }
     Ok(filtered)
-}
-
-// 🟢 Modified ProcessedRecord generation logic, parse file size
-fn process_records(records: Vec<EnaRecord>, args: &DownloadArgs) -> Result<Vec<ProcessedRecord>> {
-    info!("⚙️  Processing records...");
-    let mut processed = Vec::new();
-    for record in records {
-        let ftp_urls: Vec<&str> = record.fastq_ftp.split(';').filter(|s| !s.is_empty()).collect();
-        let md5s: Vec<&str> = record.fastq_md5.split(';').filter(|s| !s.is_empty()).collect();
-        // 🟢 Parse file size
-        let sizes: Vec<u64> = record.fastq_bytes.split(';')
-            .filter_map(|s| s.parse::<u64>().ok())
-            .collect();
-
-        if ftp_urls.is_empty() || md5s.is_empty() {
-            warn!("⚠️  Skipping invalid record (no files): {}", record.run_accession);
-            continue;
-        }
-        if args.pe_only && ftp_urls.len() < 2 {
-            warn!("⚠️  Skipping Single-End record (--pe-only active): {}", record.run_accession);
-            continue;
-        }
-
-        let ftp_1_url = ftp_urls[0].to_string();
-        let ftp_1_name = ftp_1_url.rsplit('/').next().unwrap_or("").to_string();
-        let md5_1 = md5s[0].to_string();
-        let size_1 = *sizes.get(0).unwrap_or(&0);
-
-        let (ftp_2_url, ftp_2_name, md5_2, size_2) = if ftp_urls.len() >= 2 && md5s.len() >= 2 {
-            (
-                Some(ftp_urls[1].to_string()),
-                Some(ftp_urls[1].rsplit('/').next().unwrap_or("").to_string()),
-                Some(md5s[1].to_string()),
-                sizes.get(1).copied()
-            )
-        } else {
-            (None, None, None, None)
-        };
-
-        processed.push(ProcessedRecord {
-            run_accession: record.run_accession,
-            fastq_ftp_1_url: ftp_1_url,
-            fastq_ftp_2_url: ftp_2_url,
-            fastq_ftp_1_name: ftp_1_name,
-            fastq_ftp_2_name: ftp_2_name,
-            fastq_md5_1: md5_1,
-            fastq_md5_2: md5_2,
-            // 🟢 Assign size
-            fastq_bytes_1: size_1,
-            fastq_bytes_2: size_2,
-            sample_title: record.sample_title,
-        });
-    }
-    info!("✅ Processed {} records", processed.len());
-    Ok(processed)
 }
 
 fn save_md5_files(records: &[ProcessedRecord], output_dir: &Path, accession: Option<&str>) -> Result<()> {
@@ -801,7 +605,7 @@ async fn run_command(cmd: &str, dir: &Path) -> Result<()> {
 
 // Prefetch Entry
 async fn download_with_prefetch(records: &[ProcessedRecord], config: &Config, args: &DownloadArgs) -> Result<()> {
-    prefetch::download_all(records, config, &args.output, args.multithreads, args.aws_threads, &args.prefetch_max_size, args.cleanup_sra).await
+    ebidownload_core::prefetch::download_all(records, config, &args.output, args.multithreads, args.aws_threads, &args.prefetch_max_size, args.cleanup_sra).await
 }
 
 // AWS Entry (Keep original logic)
@@ -837,12 +641,12 @@ async fn download_with_aws(records: &[ProcessedRecord], config: &Config, args: &
         let handle = tokio::spawn(async move {
             let _permit = sem.acquire().await.expect("semaphore closed");
 
-            let metadata = aws_s3::SraUtils::get_metadata(&run_id, None).await?;
+            let metadata = ebidownload_core::aws_s3::SraUtils::get_metadata(&run_id, None).await?;
             let sra_filename = format!("{}.sra", run_id);
             info!(target: "download_detail", "📥 [{}] Step 1: Downloading via AWS S3...", run_id);
 
             if let Some(sra_metadata) = metadata {
-                let downloader = aws_s3::ResumableDownloader::new(
+                let downloader = ebidownload_core::aws_s3::ResumableDownloader::new(
                     run_id.clone(),
                     sra_metadata,
                     output_dir.clone(),
@@ -935,80 +739,23 @@ async fn download_with_aws(records: &[ProcessedRecord], config: &Config, args: &
 // FTP Entry
 async fn download_with_ftp(records: &[ProcessedRecord], config: &Config, args: &DownloadArgs) -> Result<()> {
     // 🟢 Call ftp.rs, pass file size to enable percentage progress bar
-    ftp::process_downloads(
+    ebidownload_core::ftp::process_downloads(
         records,
         config,
         &args.output,
-        ftp::Protocol::Ftp,
+        ebidownload_core::ftp::Protocol::Ftp,
         args.multithreads
     ).await
 }
 
 // Aspera Entry
 async fn download_with_ascp(records: &[ProcessedRecord], config: &Config, args: &DownloadArgs) -> Result<()> {
-    ftp::process_downloads(
+    ebidownload_core::ftp::process_downloads(
         records,
         config,
         &args.output,
-        ftp::Protocol::Ascp,
+        ebidownload_core::ftp::Protocol::Ascp,
         args.multithreads
     ).await
 }
-fn check_executable(path: &std::path::Path, name: &str) -> Result<()> {
-    if !path.exists() {
-        return Err(anyhow::anyhow!(
-            "{} not found at configured path: {}. Please check your EBIDownload.yaml configuration.",
-            name,
-            path.display()
-        ));
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let metadata = std::fs::metadata(path)?;
-        if metadata.permissions().mode() & 0o111 == 0 {
-            return Err(anyhow::anyhow!(
-                "{} at {} exists but is not executable. Please check permissions.",
-                name,
-                path.display()
-            ));
-        }
-    }
-    info!("✅ {} check passed: {}", name, path.display());
-    Ok(())
-}
 
-fn check_file_exists(path: &std::path::Path, name: &str) -> Result<()> {
-    if !path.exists() {
-        return Err(anyhow::anyhow!(
-            "{} not found at configured path: {}. Please check your EBIDownload.yaml configuration.",
-            name,
-            path.display()
-        ));
-    }
-    info!("✅ {} check passed: {}", name, path.display());
-    Ok(())
-}
-
-fn check_prefetch_config(config: &Config) -> Result<()> {
-    check_executable(&config.software.prefetch, "prefetch")
-}
-
-fn check_ascp_config(config: &Config) -> Result<()> {
-    check_executable(&config.software.ascp, "ascp")?;
-    check_file_exists(&config.setting.openssh, "Aspera openssh key")
-}
-
-fn check_fasterq_dump_config(config: &Config) -> Result<()> {
-    check_executable(&config.software.fasterq_dump, "fasterq-dump")
-}
-
-fn check_pigz_dependency() -> Result<()> {
-    if which::which("pigz").is_err() {
-        return Err(anyhow::anyhow!(
-            "pigz not found in system PATH. Please install pigz first:\n  Ubuntu/Debian: sudo apt-get install pigz\n  macOS: brew install pigz\n  Or ensure pigz is in your PATH."
-        ));
-    }
-    info!("✅ pigz check passed");
-    Ok(())
-}

@@ -3,22 +3,26 @@
 
 # EBIDownload
 
-EBIDownload is a command-line tool developed in Rust for efficiently downloading sequencing data from the European Bioinformatics Institute (EBI) FTP server and NCBI SRA. By default, it utilizes **AWS S3 global acceleration** to achieve ultra-fast download speeds (comparable to IDM/Aspera). **It is capable of downloading 2TB of data from the SRA database to local storage within 24 hours**, while providing full support for **resumable downloads** and **MD5 integrity verification**. It also employs [pigz](https://zlib.net/pigz/) for parallel decompression, significantly improving data acquisition efficiency.
+EBIDownload is a Rust-based toolkit for efficiently downloading and uploading sequencing data from the European Bioinformatics Institute (EBI) and NCBI SRA. It provides both a **command-line interface (CLI)** and a **cross-platform desktop GUI** (powered by Tauri), making it accessible to both bioinformatics engineers and wet-lab researchers.
 
-In addition, EBIDownload supports **Aspera CLI (`ascp`)** as an alternative high-speed download method, which can be selected via the `-d ascp` flag. To use this fallback, you must configure the Aspera path and key in the `EBIDownload.yaml` file (see [Configuration File](#3-configuration-file)).
+By default, EBIDownload utilizes **AWS S3 global acceleration** to achieve ultra-fast download speeds (comparable to IDM/Aspera). **It is capable of downloading 2TB of data from the SRA database to local storage within 24 hours**, while providing full support for **resumable downloads** and **MD5 integrity verification**. It also employs [pigz](https://zlib.net/pigz/) for parallel decompression, significantly improving data acquisition efficiency.
+
+In addition, EBIDownload supports **Aspera CLI (`ascp`)** as an alternative high-speed download method, which can be selected via the `-d ascp` flag (CLI) or the download method dropdown (GUI). To use this fallback, you must configure the Aspera path and key in the `EBIDownload.yaml` file (see [Configuration File](#4-configuration-file)).
 
 ![EBIDownload](./docs/Download.png)
 
 ## Features
 
+- **Dual Interface (CLI + GUI)**: Choose between a powerful command-line tool for scripting and automation, or an intuitive desktop GUI (Windows/macOS/Linux) for visual operation.
 - **AWS S3 Acceleration (Most Recommended)**: Direct multi-threaded downloading from NCBI SRA AWS S3 buckets, maximizing bandwidth utilization for global high-speed access. This is the fastest and most reliable method for large-scale data acquisition.
 - **Aspera Fallback (Alternative)**: Integrates Aspera CLI (`ascp`) as an alternative high-speed channel when AWS S3 is unavailable or not preferred.
 - **Parallel Processing**: Supports multi-threaded downloading and decompression.
-- **Easy Configuration**: Manages software paths and keys through a simple YAML file.
-- **Flexible Usage**: Supports direct downloads via project accession numbers.
+- **Easy Configuration**: Manages software paths and keys through a simple YAML file. The GUI provides a visual settings panel for path configuration.
+- **Flexible Usage**: Supports direct downloads via project accession numbers or TSV file lists.
 - **Resumable Downloads**: Supports resumable downloads in `aws`, `ascp` and `prefetch` modes, ensuring download continuity.
 - **Smart Auto-Fallback**: Automatically attempts AWS S3 first and seamlessly switches to Prefetch if the AWS download fails (Mode: `auto`).
 - **Advanced Filtering**: Supports Regex-based filtering to precisely include or exclude specific samples or runs.
+- **Real-time Progress (GUI)**: Visual progress bars, download queue management, and live log streaming in the desktop application.
 
 ---
 
@@ -58,27 +62,150 @@ conda activate EBIDownload_env
 
 ---
 
-## 2. Building the Program
+## 2. Project Structure
 
-This project is written in Rust. You need to install the [Rust environment](https://www.rust-lang.org/tools/install) first.
+This project is organized as a Rust workspace with three crates:
 
-```bash
-# Clone the repository
-# git clone git@github.com:xsx123123/EBIDownload.git
-# cd EBIDownload
-
-# Build for development (faster, for debugging)
-CC=clang cargo build
-
-# Build for release (optimized for performance, for production)
-CC=clang cargo build --release
+```
+crates/
+├── ebidownload-core/     # Shared library: download/upload logic + data types
+├── ebidownload-cli/      # Command-line tool
+└── ebidownload-gui/      # Tauri desktop application (Rust backend + React frontend)
 ```
 
-The compiled executable will be located at `target/release/EBIDownload`.
+The **core** crate contains all shared business logic (AWS S3, FTP, Aspera, Prefetch, S3 Upload). Both CLI and GUI depend on it, ensuring consistent behavior across interfaces.
 
 ---
 
-## 3. Configuration File
+## 3. Building the Program
+
+### Prerequisites
+
+- [Rust](https://www.rust-lang.org/tools/install) toolchain
+- [Node.js](https://nodejs.org/) 18+ (only for GUI build)
+- External tools: `sra-tools`, `pigz` (see [Prerequisites and Setup](#1-prerequisites-and-setup))
+
+### a. Build CLI Only
+
+```bash
+# Build CLI for development
+CC=clang cargo build -p ebidownload-cli
+
+# Build CLI for release
+CC=clang cargo build -p ebidownload-cli --release
+
+# Run CLI
+./target/release/EBIDownload --help
+```
+
+### b. Build GUI (Desktop App)
+
+Tauri **does not support cross-compilation**. You must build on the target platform:
+
+| Target Platform | Build Host | Output Format |
+|-----------------|------------|---------------|
+| macOS | macOS (Intel or Apple Silicon) | `.dmg`, `.app` |
+| Windows | Windows | `.msi`, `.exe` |
+| Linux | Linux | `.AppImage`, `.deb` |
+
+#### macOS
+
+```bash
+# 1. Install system dependencies
+xcode-select --install
+brew install pigz sra-tools
+
+# 2. Build
+cd crates/ebidownload-gui
+npm install
+npm run tauri build
+
+# 3. Output
+#   Intel Mac:    src-tauri/target/release/bundle/dmg/EBIDownload_1.3.7_x64.dmg
+#   Apple Silicon: src-tauri/target/release/bundle/dmg/EBIDownload_1.3.7_aarch64.dmg
+```
+
+**Important**: Create `EBIDownload.yaml` with macOS paths before running:
+
+```yaml
+# Apple Silicon Mac (M1/M2/M3)
+software:
+  prefetch: /opt/homebrew/bin/prefetch
+  fasterq_dump: /opt/homebrew/bin/fasterq-dump
+  ascp: /Applications/Aspera\ Connect.app/Contents/Resources/ascp
+setting:
+  openssh: /Applications/Aspera\ Connect.app/Contents/Resources/asperaweb_id_dsa.openssh
+```
+
+#### Windows
+
+```powershell
+# 1. Install dependencies
+#    - Install pigz: download from https://zlib.net/pigz/ and add to PATH
+#    - Install sra-tools: https://github.com/ncbi/sra-tools/wiki/02.-Installing-SRA-Toolkit
+
+# 2. Build (in PowerShell or CMD)
+cd crates\ebidownload-gui
+npm install
+npm run tauri build
+
+# 3. Output
+#    src-tauri\target\release\bundle\msi\EBIDownload_1.3.7_x64_en-US.msi
+#    src-tauri\target\release\bundle\nsis\EBIDownload_1.3.7_x64-setup.exe
+```
+
+**Note**: Windows may show a SmartScreen warning on first run because the binary is not code-signed. This is expected for unsigned applications.
+
+#### Linux
+
+```bash
+# 1. Install dependencies (Ubuntu/Debian example)
+sudo apt-get update
+sudo apt-get install libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+sudo apt-get install pigz sra-tools
+
+# 2. Build
+cd crates/ebidownload-gui
+npm install
+npm run tauri build
+
+# 3. Output
+#    src-tauri/target/release/bundle/appimage/ebidownload_1.3.7_amd64.AppImage
+#    src-tauri/target/release/bundle/deb/ebidownload_1.3.7_amd64.deb
+```
+
+### c. CI/CD Automatic Multi-Platform Build
+
+To build for all three platforms automatically, use GitHub Actions. See [`.github/workflows/build.yml`](./.github/workflows/build.yml) for a ready-to-use workflow that produces `.dmg`, `.msi`, and `.AppImage` on every release.
+
+```yaml
+# .github/workflows/build.yml (example)
+name: Release Build
+on:
+  push:
+    tags: [ 'v*' ]
+jobs:
+  build:
+    strategy:
+      matrix:
+        platform: [macos-latest, ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-action@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: cd crates/ebidownload-gui && npm install && npm run tauri build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bundle-${{ matrix.platform }}
+          path: crates/ebidownload-gui/src-tauri/target/release/bundle/*
+```
+
+---
+
+## 4. Configuration File
 
 This program uses a YAML file (defaulting to `EBIDownload.yaml`) to configure the paths for external tools, including the Aspera CLI (`ascp`) and `sra-tools` (`prefetch`, `fasterq-dump`).
 
@@ -103,28 +230,39 @@ setting:
 
 ---
 
-## 4. Usage
+## 5. Usage
 
-### a. Command-Line Arguments
+### GUI (Desktop Application)
 
-According to the program's help information, the correct usage is as follows:
+The GUI provides an intuitive interface for users who prefer visual operation over command-line tools.
+
+```bash
+cd crates/ebidownload-gui
+npm run tauri dev
+```
+
+**Interface Overview:**
+
+| Tab | Function |
+|-----|----------|
+| **Download** | Enter Accession ID, select output directory, choose download method (AWS/Aspera/FTP/Prefetch/Auto), set parallel threads, and start downloading. Supports fetching metadata preview before download. |
+| **Upload** | Select files, enter S3 bucket name, configure upload settings, and submit to NCBI SRA via AWS S3. |
+| **Settings** | Visually configure paths for `ascp`, `prefetch`, `fasterq-dump`, and Aspera OpenSSH key. |
+
+**Features:**
+- Real-time download progress bars for each run
+- Live log panel showing download/conversion/compression status
+- Dry-run mode to preview what would be downloaded
+- Support for TSV file input (batch download)
+
+---
+
+### CLI (Command-Line Tool)
+
+#### a. Command-Line Arguments
 
 ```
-./EBIDownload  -h
-
-    ███████╗██████╗ ██╗██████╗  ██████╗ ██╗      ██████╗  █████╗ ██████╗ 
-    ██╔════╝██╔══██╗██║██╔══██╗██╔═══██╗██║     ██╔═══██╗██╔══██╗██╔══██╗
-    █████╗  ██████╔╝██║██║  ██║██║   ██║██║     ██║   ██║███████║██║  ██║
-    ██╔══╝  ██╔══██╗██║██║  ██║██║   ██║██║     ██║   ██║██╔══██║██║  ██║
-    ███████╗██████╔╝██║██████╔╝╚██████╔╝███████╗╚██████╔╝██║  ██║██████╔╝
-    ╚══════╝╚═════╝ ╚═╝╚═════╝  ╚═════╝ ╚══════╝ ╚═════╝ ╚═╝  ╚═╝╚═════╝ 
-
-              🧬  EMBL-ENA Data Toolkit   |  v1.3.7
-
-
-Download EMBL-ENA sequencing data
-
-Usage: EBIDownload [OPTIONS] --output <DIR>
+./target/release/EBIDownload -h
 ```
 
 | Short | Long             | Description                                      | Default      |
@@ -152,7 +290,7 @@ Usage: EBIDownload [OPTIONS] --output <DIR>
 
 **Note**: The `-A` and `-T` options are typically mutually exclusive and are used to specify the data source to download.
 
-### b. Example
+#### b. Example
 
 **1. AWS S3 High-Speed Mode (Most Recommended)**
 
@@ -221,7 +359,7 @@ This tool leverages the AWS S3 open data pool (`s3://sra-pub-run-odp/`) for high
 > **Note**: This limitation stems from the NCBI data archiving architecture, not a technical defect of this tool. For urgent needs, we recommend contacting the data submitter to obtain the original files directly.
 
 ---
-## 5. Output Structure
+## 6. Output Structure
 
 After the script runs, the output directory will contain the following files and directories:
 
@@ -250,7 +388,7 @@ After the script runs, the output directory will contain the following files and
 
 ---
 
-## 6. Upload to NCBI SRA via AWS S3
+## 7. Upload to NCBI SRA via AWS S3
 
 In addition to downloading, EBIDownload supports **uploading sequencing data to AWS S3** for fast NCBI SRA submission. This is useful when you need to submit large volumes of data (hundreds of GB to TB scale) and want to leverage AWS's enterprise-grade bandwidth for reliable, high-speed uploads.
 
