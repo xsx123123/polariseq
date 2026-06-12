@@ -579,6 +579,24 @@ tr:hover td {
   border-color: var(--border-focus);
 }
 
+/* Global download progress */
+.global-progress {
+  margin-bottom: 1.25rem;
+  padding: 1rem;
+  background: var(--bg-input);
+  border: 1px solid var(--border-dim);
+  border-radius: var(--radius-md);
+}
+
+.global-progress-header {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.875rem;
+  font-weight: 600;
+  margin-bottom: 0.5rem;
+  color: var(--text-main);
+}
+
 /* About tab */
 .about-tab {
   max-width: 720px;

@@ -60,6 +60,7 @@ function App() {
   const [isDownloading, setIsDownloading] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [downloadProgress, setDownloadProgress] = useState<Record<string, { percent: number; status: string }>>({});
+  const [globalProgress, setGlobalProgress] = useState<{ total: number; completed: number; percent: number } | null>(null);
   const [uploadProgress, setUploadProgress] = useState<Record<string, { percent: number; status: string }>>({});
   const [logs, setLogs] = useState<{ level: string; message: string; time: string }[]>([]);
   const [logLevelFilter, setLogLevelFilter] = useState<string>('info');
@@ -234,22 +235,34 @@ function App() {
     setLogs(prev => [...prev.slice(-100), { level, message, time }]);
   };
 
+  const updateGlobalProgress = (nextProgress: Record<string, { percent: number; status: string }>, totalCount: number) => {
+    const completedCount = Object.values(nextProgress).filter(p => p.status === 'Completed').length;
+    const percent = totalCount > 0 ? (completedCount / totalCount) * 100 : 0;
+    setGlobalProgress({ total: totalCount, completed: completedCount, percent });
+  };
+
   const handleDownloadEvent = (event: DownloadEvent) => {
     switch (event.type) {
       case 'Log':
         addLog(event.data.level, event.data.message);
         break;
       case 'Progress':
-        setDownloadProgress(prev => ({
-          ...prev,
-          [event.data.run_id]: {
-            percent: event.data.percent,
-            status: event.data.status,
-          },
-        }));
+        setDownloadProgress(prev => {
+          const next = {
+            ...prev,
+            [event.data.run_id]: {
+              percent: event.data.percent,
+              status: event.data.status,
+            },
+          };
+          const totalCount = Object.keys(next).length;
+          updateGlobalProgress(next, totalCount);
+          return next;
+        });
         break;
       case 'Started':
         setIsDownloading(true);
+        setGlobalProgress({ total: event.data.total, completed: 0, percent: 0 });
         addLog('info', `Starting download of ${event.data.total} files`);
         break;
       case 'Completed':
@@ -550,6 +563,7 @@ function App() {
             setForm={setDownloadForm}
             metadata={metadata}
             progress={downloadProgress}
+            globalProgress={globalProgress}
             isDownloading={isDownloading}
             onFetchMetadata={handleFetchMetadata}
             onStartDownload={handleStartDownload}
@@ -648,6 +662,7 @@ function DownloadTab({
   setForm,
   metadata,
   progress,
+  globalProgress,
   isDownloading,
   onFetchMetadata,
   onStartDownload,
@@ -948,6 +963,25 @@ function DownloadTab({
             </svg>
           </div>
         </div>
+
+        {globalProgress && globalProgress.total > 0 && (
+          <div className="global-progress">
+            <div className="global-progress-header">
+              <span>Overall Progress</span>
+              <span>{globalProgress.completed} / {globalProgress.total} ({Math.round(globalProgress.percent)}%)</span>
+            </div>
+            <div className="progress-bar-container" style={{ height: '10px' }}>
+              <div
+                className="progress-bar"
+                style={{
+                  width: `${globalProgress.percent}%`,
+                  transition: 'width 0.4s ease',
+                }}
+              />
+            </div>
+          </div>
+        )}
+
         {metadataExpanded && (
           metadata.length > 0 ? (
             <div className="metadata-container">
@@ -961,36 +995,33 @@ function DownloadTab({
                   </tr>
                 </thead>
                 <tbody>
-                  {metadata.map((record: EnaRecord) => {
-                    const isIncluded = shouldInclude(record);
-                    return (
-                      <tr key={record.run_accession} style={{ opacity: isIncluded ? 1 : 0.35 }}>
-                        <td style={{ fontWeight: 600, color: isIncluded ? 'var(--primary)' : 'var(--text-muted)' }}>{record.run_accession}</td>
-                        <td style={{ maxWidth: '300px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{record.sample_title}</td>
-                        <td><span className="status-badge" style={{ backgroundColor: '#334155', color: '#f1f5f9' }}>{record.library_layout || 'N/A'}</span></td>
-                        <td>
-                          {progress[record.run_accession] ? (
-                            <div style={{ minWidth: '150px' }}>
-                              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.75rem', marginBottom: '0.25rem' }}>
-                                <span className={`status-badge ${getStatusClass(progress[record.run_accession].status)}`}>
-                                  {progress[record.run_accession].status}
-                                </span>
-                                <span>{Math.round(progress[record.run_accession].percent)}%</span>
-                              </div>
-                              <div className="progress-bar-container">
-                                <div
-                                  className={`progress-bar ${getProgressBarClass(progress[record.run_accession].status)}`}
-                                  style={{ width: `${progress[record.run_accession].percent}%` }}
-                                />
-                              </div>
+                  {metadata.filter(shouldInclude).map((record: EnaRecord) => (
+                    <tr key={record.run_accession}>
+                      <td style={{ fontWeight: 600, color: 'var(--primary)' }}>{record.run_accession}</td>
+                      <td style={{ maxWidth: '300px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{record.sample_title}</td>
+                      <td><span className="status-badge" style={{ backgroundColor: '#334155', color: '#f1f5f9' }}>{record.library_layout || 'N/A'}</span></td>
+                      <td>
+                        {progress[record.run_accession] ? (
+                          <div style={{ minWidth: '150px' }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.75rem', marginBottom: '0.25rem' }}>
+                              <span className={`status-badge ${getStatusClass(progress[record.run_accession].status)}`}>
+                                {progress[record.run_accession].status}
+                              </span>
+                              <span>{Math.round(progress[record.run_accession].percent)}%</span>
                             </div>
-                          ) : (
-                            <span className="status-badge" style={{ opacity: 0.5 }}>{isIncluded ? 'Pending' : 'Excluded'}</span>
-                          )}
-                        </td>
-                      </tr>
-                    );
-                  })}
+                            <div className="progress-bar-container">
+                              <div
+                                className={`progress-bar ${getProgressBarClass(progress[record.run_accession].status)}`}
+                                style={{ width: `${progress[record.run_accession].percent}%` }}
+                              />
+                            </div>
+                          </div>
+                        ) : (
+                          <span className="status-badge" style={{ opacity: 0.5 }}>Pending</span>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
                 </tbody>
               </table>
             </div>
