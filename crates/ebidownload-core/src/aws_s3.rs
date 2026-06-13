@@ -10,7 +10,7 @@ use std::fs::File;
 use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::sync::{Mutex, mpsc}; 
 use tokio::io::AsyncReadExt; 
@@ -29,6 +29,38 @@ pub struct SraMetadata {
     pub http_url: String, 
     pub md5: Option<String>,
     pub size: u64,
+}
+
+/// Simple pause/resume token that can be shared between the GUI and the
+/// AWS download workers.
+#[derive(Clone, Default)]
+pub struct PauseToken {
+    paused: Arc<AtomicBool>,
+}
+
+impl PauseToken {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn pause(&self) {
+        self.paused.store(true, Ordering::Relaxed);
+    }
+
+    pub fn resume(&self) {
+        self.paused.store(false, Ordering::Relaxed);
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.paused.load(Ordering::Relaxed)
+    }
+
+    /// Async-friendly wait: yields back to the Tokio runtime while paused.
+    pub async fn wait_while_paused(&self) {
+        while self.is_paused() {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -177,6 +209,8 @@ pub struct ResumableDownloader {
     max_workers: usize,
     client: Client,
     mp: Option<Arc<MultiProgress>>,
+    progress_bytes: Option<Arc<AtomicU64>>,
+    pause_token: Option<PauseToken>,
 }
 
 impl ResumableDownloader {
@@ -201,7 +235,17 @@ impl ResumableDownloader {
             .pool_max_idle_per_host(max_workers)
             .build()?;
 
-        Ok(Self { run_id, metadata, filepath, meta_file, chunk_size: chunk_size_mb * 1024 * 1024, max_workers, client, mp })
+        Ok(Self { run_id, metadata, filepath, meta_file, chunk_size: chunk_size_mb * 1024 * 1024, max_workers, client, mp, progress_bytes: None, pause_token: None })
+    }
+
+    pub fn with_progress_bytes(mut self, progress: Arc<AtomicU64>) -> Self {
+        self.progress_bytes = Some(progress);
+        self
+    }
+
+    pub fn with_pause_token(mut self, token: PauseToken) -> Self {
+        self.pause_token = Some(token);
+        self
     }
 
     // ... (load_progress, save_progress, start, verify_integrity methods remain unchanged)
@@ -289,7 +333,16 @@ impl ResumableDownloader {
 
         let initial_bytes = downloaded_chunks.len() as u64 * self.chunk_size;
         // 🟢 Fix: Use AtomicU64 to track global progress safely (handles retries)
-        let global_bytes = Arc::new(AtomicU64::new(std::cmp::min(initial_bytes, self.metadata.size)));
+        // If the caller supplied a shared counter (e.g. the GUI), use it so the
+        // progress can be observed externally.
+        let global_bytes = self
+            .progress_bytes
+            .clone()
+            .unwrap_or_else(|| Arc::new(AtomicU64::new(0)));
+        global_bytes.store(
+            std::cmp::min(initial_bytes, self.metadata.size),
+            Ordering::Relaxed,
+        );
         
         pb.set_position(global_bytes.load(Ordering::Relaxed));
         
@@ -306,6 +359,7 @@ impl ResumableDownloader {
 
         let (tx, mut rx) = mpsc::channel(100); 
         let shared_tasks = Arc::new(Mutex::new(tasks));
+        let pause_token = self.pause_token.clone();
         for _ in 0..self.max_workers {
             let client = self.client.clone();
             let url = self.metadata.http_url.clone();
@@ -313,12 +367,17 @@ impl ResumableDownloader {
             let queue = shared_tasks.clone();
             let tx = tx.clone();
             let gb_clone = global_bytes.clone();
+            let pause_token_worker = pause_token.clone();
             tokio::spawn(async move {
                 loop {
+                    if let Some(token) = &pause_token_worker {
+                        token.wait_while_paused().await;
+                    }
+
                     let task = { let mut q = queue.lock().await; q.pop() };
                     match task {
                         Some(t) => {
-                            match download_chunk_http(client.clone(), &url, &t, &filepath, gb_clone.clone()).await {
+                            match download_chunk_http(client.clone(), &url, &t, &filepath, gb_clone.clone(), pause_token_worker.clone()).await {
                                 Ok(_) => { if let Err(_) = tx.send(Ok(t.id)).await { break; } },
                                 Err(e) => { let _ = tx.send(Err(e)).await; }
                             }
@@ -402,11 +461,23 @@ impl ResumableDownloader {
     }
 }
 
-async fn download_chunk_http(client: Client, url: &str, chunk: &ChunkInfo, filepath: &Path, global_bytes: Arc<AtomicU64>) -> Result<()> {
+async fn download_chunk_http(
+    client: Client,
+    url: &str,
+    chunk: &ChunkInfo,
+    filepath: &Path,
+    global_bytes: Arc<AtomicU64>,
+    pause_token: Option<PauseToken>,
+) -> Result<()> {
     let mut retry = 0;
     let mut current_offset = chunk.start;
 
     loop {
+        // Yield while paused so the user can pause/resume the download.
+        if let Some(token) = &pause_token {
+            token.wait_while_paused().await;
+        }
+
         if current_offset > chunk.end {
             return Ok(());
         }
@@ -430,6 +501,12 @@ async fn download_chunk_http(client: Client, url: &str, chunk: &ChunkInfo, filep
                 let offset_start = current_offset;
 
                 while let Some(item) = stream.next().await {
+                    // Check pause inside the byte stream loop so an active
+                    // HTTP connection also stops downloading immediately.
+                    if let Some(token) = &pause_token {
+                        token.wait_while_paused().await;
+                    }
+
                     match item {
                         Ok(bytes) => {
                             if let Err(_) = file.write_all(&bytes) { stream_error = true; break; }

@@ -6,7 +6,9 @@ use serde::{Deserialize, Serialize};
 use serde_json;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use ::tauri::{State, Emitter};
 
 // ============================================================
@@ -18,6 +20,9 @@ pub struct AppState {
     config_path: Mutex<PathBuf>,
     is_downloading: Arc<Mutex<bool>>,
     is_uploading: Arc<Mutex<bool>>,
+    download_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    upload_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    download_pause_token: Arc<Mutex<Option<crate::aws_s3::PauseToken>>>,
 }
 
 impl AppState {
@@ -27,17 +32,19 @@ impl AppState {
             config_path: Mutex::new(default_config_path()),
             is_downloading: Arc::new(Mutex::new(false)),
             is_uploading: Arc::new(Mutex::new(false)),
+            download_handle: Arc::new(Mutex::new(None)),
+            upload_handle: Arc::new(Mutex::new(None)),
+            download_pause_token: Arc::new(Mutex::new(None)),
         }
     }
 }
 
 /// Returns the default user-specific config path.
-/// macOS/Linux: ~/.config/EBIDownload/EBIDownload.yaml
-/// Windows:     %APPDATA%\EBIDownload\EBIDownload.yaml
+/// All platforms: ~/.EBIDownload/EBIDownload.yaml
 fn default_config_path() -> PathBuf {
-    dirs::config_dir()
+    dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("EBIDownload")
+        .join(".EBIDownload")
         .join("EBIDownload.yaml")
 }
 
@@ -87,7 +94,7 @@ impl Default for AppState {
 #[serde(tag = "type", content = "data")]
 pub enum DownloadEvent {
     Log { level: String, message: String },
-    Progress { run_id: String, percent: f64, status: String },
+    Progress { run_id: String, percent: f64, status: String, speed_mbps: f64 },
     Started { total: usize },
     Completed,
     Error { message: String },
@@ -199,7 +206,14 @@ pub struct ConfigInput {
 
 #[::tauri::command]
 pub async fn get_config_command(state: State<'_, AppState>) -> Result<Option<Config>, String> {
-    Ok(state.config.lock().unwrap().clone())
+    let mut config_guard = state.config.lock().unwrap();
+    if config_guard.is_none() {
+        let config_path = state.config_path.lock().unwrap().clone();
+        if let Ok(config) = load_config(&config_path) {
+            *config_guard = Some(config);
+        }
+    }
+    Ok(config_guard.clone())
 }
 
 #[::tauri::command]
@@ -235,6 +249,9 @@ pub async fn start_download_command(
     let config = state.config.lock().unwrap().clone();
     let config = config.ok_or_else(|| "Config not loaded".to_string())?;
     let is_downloading_flag = state.is_downloading.clone();
+    let download_handle_slot = state.download_handle.clone();
+    let pause_token = crate::aws_s3::PauseToken::new();
+    *state.download_pause_token.lock().unwrap() = Some(pause_token.clone());
 
     // Validate config first
     if let Err(e) = validate_config(&config, options.download_method) {
@@ -250,9 +267,15 @@ pub async fn start_download_command(
         return Err(format!("Failed to create output directory: {}", e));
     }
 
+    // Mirror runtime logs to a file inside the output directory.
+    let log_file_path = PathBuf::from(&options.output).join("EBIDownload.log");
+    if let Err(e) = crate::logger::set_log_file(&log_file_path) {
+        eprintln!("Failed to set log file at {:?}: {}", log_file_path, e);
+    }
+
     // Spawn download task
-    tokio::spawn(async move {
-        let result = run_download_async(config, options, app_handle.clone()).await;
+    let handle = tokio::spawn(async move {
+        let result = run_download_async(config, options, app_handle.clone(), Some(pause_token)).await;
 
         let mut is_downloading = is_downloading_flag.lock().unwrap();
         *is_downloading = false;
@@ -261,7 +284,10 @@ pub async fn start_download_command(
             eprintln!("Download failed: {}", e);
             let _ = app_handle.emit("download-event", DownloadEvent::Error { message: e.to_string() });
         }
+
+        crate::logger::clear_log_file();
     });
+    *download_handle_slot.lock().unwrap() = Some(handle);
 
     Ok(())
 }
@@ -270,6 +296,7 @@ async fn run_download_async(
     config: Config,
     options: DownloadOptions,
     app_handle: ::tauri::AppHandle,
+    pause_token: Option<crate::aws_s3::PauseToken>,
 ) -> Result<()> {
     let records = if let Some(accession) = &options.accession {
         fetch_ena_data(accession).await?
@@ -302,7 +329,7 @@ async fn run_download_async(
     }
 
     match options.download_method {
-        DownloadMethod::Aws => download_aws(processed, config, options, app_handle).await,
+        DownloadMethod::Aws => download_aws(processed, config, options, app_handle, pause_token).await,
         DownloadMethod::Prefetch => download_prefetch(processed, config, options, app_handle).await,
         DownloadMethod::Ftp => download_ftp(processed, config, options, app_handle, crate::ftp::Protocol::Ftp).await,
         DownloadMethod::Ascp => download_ftp(processed, config, options, app_handle, crate::ftp::Protocol::Ascp).await,
@@ -311,7 +338,7 @@ async fn run_download_async(
                 level: "info".to_string(),
                 message: "Auto mode: trying AWS S3 first...".to_string(),
             })?;
-            if let Err(e) = download_aws(processed.clone(), config.clone(), options.clone(), app_handle.clone()).await {
+            if let Err(e) = download_aws(processed.clone(), config.clone(), options.clone(), app_handle.clone(), pause_token.clone()).await {
                 app_handle.emit("download-event", DownloadEvent::Log {
                     level: "warn".to_string(),
                     message: format!("AWS failed ({}), falling back to Prefetch", e),
@@ -333,6 +360,7 @@ async fn download_aws(
     config: Config,
     options: DownloadOptions,
     app_handle: ::tauri::AppHandle,
+    pause_token: Option<crate::aws_s3::PauseToken>,
 ) -> Result<()> {
     let file_concurrency = options.multithreads;
     let chunk_concurrency = options.aws_threads;
@@ -353,6 +381,7 @@ async fn download_aws(
         let max_workers = chunk_concurrency;
         let chunk_size = chunk_size_mb;
         let fasterq_dump = fasterq_dump.clone();
+        let pause_token = pause_token.clone();
 
         let handle = tokio::spawn(async move {
             let _permit = sem.acquire().await.expect("semaphore closed");
@@ -361,10 +390,47 @@ async fn download_aws(
                 run_id: run_id.clone(),
                 percent: 0.0,
                 status: "Downloading".to_string(),
+                speed_mbps: 0.0,
             })?;
 
             let metadata = crate::aws_s3::SraUtils::get_metadata(&run_id, None).await?;
             if let Some(sra_metadata) = metadata {
+                let total_size = sra_metadata.size;
+                let progress_bytes = Arc::new(AtomicU64::new(0));
+                let progress_bytes_monitor = progress_bytes.clone();
+                let app_handle_monitor = app_handle.clone();
+                let run_id_monitor = run_id.clone();
+
+                // Periodically report real-time download progress and speed to the frontend.
+                let monitor_handle = tokio::spawn(async move {
+                    let mut interval = tokio::time::interval(Duration::from_millis(500));
+                    let mut last_bytes = 0u64;
+                    let mut last_instant = Instant::now();
+                    loop {
+                        interval.tick().await;
+                        let bytes = progress_bytes_monitor.load(Ordering::Relaxed);
+                        let percent = if total_size > 0 {
+                            (bytes as f64 / total_size as f64) * 50.0
+                        } else {
+                            0.0
+                        };
+
+                        let elapsed = last_instant.elapsed().as_secs_f64().max(1e-6);
+                        let delta_bytes = bytes.saturating_sub(last_bytes);
+                        let speed_mbps = (delta_bytes as f64 / 1024.0 / 1024.0) / elapsed;
+
+                        last_bytes = bytes;
+                        last_instant = Instant::now();
+
+                        let _ = app_handle_monitor.emit("download-event", DownloadEvent::Progress {
+                            run_id: run_id_monitor.clone(),
+                            percent,
+                            status: "Downloading".to_string(),
+                            speed_mbps,
+                        });
+                    }
+                });
+
                 let downloader = crate::aws_s3::ResumableDownloader::new(
                     run_id.clone(),
                     sra_metadata,
@@ -372,8 +438,13 @@ async fn download_aws(
                     chunk_size,
                     max_workers,
                     None,
-                ).await?;
-                let success = downloader.start().await?;
+                ).await?
+                .with_progress_bytes(progress_bytes)
+                .with_pause_token(pause_token.clone().unwrap_or_default());
+
+                let result = downloader.start().await;
+                monitor_handle.abort();
+                let success = result?;
                 if !success {
                     return Err(anyhow::anyhow!("Download failed for {}", run_id));
                 }
@@ -385,6 +456,7 @@ async fn download_aws(
                 run_id: run_id.clone(),
                 percent: 50.0,
                 status: "Converting".to_string(),
+                speed_mbps: 0.0,
             })?;
 
             // fasterq-dump
@@ -434,6 +506,7 @@ async fn download_aws(
                     run_id: run_id.clone(),
                     percent: 75.0,
                     status: "Compressing".to_string(),
+                    speed_mbps: 0.0,
                 })?;
 
                 let output_dir_compress = output_dir.clone();
@@ -456,6 +529,7 @@ async fn download_aws(
                     run_id: run_id.clone(),
                     percent: 100.0,
                     status: "Completed".to_string(),
+                    speed_mbps: 0.0,
                 })?;
             } else {
                 return Err(anyhow::anyhow!("Conversion failed for {}", run_id));
@@ -496,6 +570,7 @@ async fn download_prefetch(
             run_id: record.run_accession.clone(),
             percent: 0.0,
             status: "Downloading".to_string(),
+            speed_mbps: 0.0,
         })?;
     }
 
@@ -514,6 +589,7 @@ async fn download_prefetch(
             run_id: record.run_accession.clone(),
             percent: 100.0,
             status: "Completed".to_string(),
+            speed_mbps: 0.0,
         })?;
     }
 
@@ -543,6 +619,7 @@ async fn download_ftp(
             run_id: record.run_accession.clone(),
             percent: 0.0,
             status: "Downloading".to_string(),
+            speed_mbps: 0.0,
         })?;
     }
 
@@ -559,6 +636,7 @@ async fn download_ftp(
             run_id: record.run_accession.clone(),
             percent: 100.0,
             status: "Completed".to_string(),
+            speed_mbps: 0.0,
         })?;
     }
 
@@ -580,9 +658,10 @@ pub async fn start_upload_command(
     drop(is_uploading);
 
     let is_uploading_flag = state.is_uploading.clone();
+    let upload_handle_slot = state.upload_handle.clone();
 
     // Spawn upload task
-    tokio::spawn(async move {
+    let handle = tokio::spawn(async move {
         let result = run_upload_async(options, app_handle.clone()).await;
 
         let mut is_uploading = is_uploading_flag.lock().unwrap();
@@ -593,6 +672,7 @@ pub async fn start_upload_command(
             let _ = app_handle.emit("upload-event", UploadEvent::Error { message: e.to_string() });
         }
     });
+    *upload_handle_slot.lock().unwrap() = Some(handle);
 
     Ok(())
 }
@@ -647,9 +727,30 @@ async fn run_upload_async(
 }
 
 #[::tauri::command]
+pub async fn pause_download_command(
+    state: State<'_, AppState>,
+    paused: bool,
+) -> Result<(), String> {
+    let token = state.download_pause_token.lock().unwrap().clone();
+    if let Some(token) = token {
+        if paused {
+            token.pause();
+        } else {
+            token.resume();
+        }
+    }
+    Ok(())
+}
+
+#[::tauri::command]
 pub async fn cancel_download_command(state: State<'_, AppState>) -> Result<(), String> {
     let mut is_downloading = state.is_downloading.lock().unwrap();
     *is_downloading = false;
+    drop(is_downloading);
+
+    if let Some(handle) = state.download_handle.lock().unwrap().take() {
+        handle.abort();
+    }
     Ok(())
 }
 
@@ -657,6 +758,11 @@ pub async fn cancel_download_command(state: State<'_, AppState>) -> Result<(), S
 pub async fn cancel_upload_command(state: State<'_, AppState>) -> Result<(), String> {
     let mut is_uploading = state.is_uploading.lock().unwrap();
     *is_uploading = false;
+    drop(is_uploading);
+
+    if let Some(handle) = state.upload_handle.lock().unwrap().take() {
+        handle.abort();
+    }
     Ok(())
 }
 
@@ -666,8 +772,14 @@ pub async fn cancel_upload_command(state: State<'_, AppState>) -> Result<(), Str
 
 #[::tauri::command]
 pub async fn check_deps_command(state: State<'_, AppState>) -> Result<crate::deps::DepStatus, String> {
-    let config = state.config.lock().unwrap().clone();
-    Ok(crate::deps::check_sra_tools(config.as_ref()))
+    let mut config_guard = state.config.lock().unwrap();
+    if config_guard.is_none() {
+        let config_path = state.config_path.lock().unwrap().clone();
+        if let Ok(config) = load_config(&config_path) {
+            *config_guard = Some(config);
+        }
+    }
+    Ok(crate::deps::check_sra_tools(config_guard.as_ref()))
 }
 
 /// Structured progress payload forwarded to the frontend during sra-tools installation.

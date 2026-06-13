@@ -20,6 +20,7 @@ pub fn run() {
             fetch_metadata_command,
             start_download_command,
             start_upload_command,
+            pause_download_command,
             cancel_download_command,
             cancel_upload_command,
             check_deps_command,

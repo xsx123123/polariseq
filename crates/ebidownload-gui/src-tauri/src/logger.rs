@@ -1,8 +1,13 @@
-//! Tracing subscriber layer that forwards log messages to the Tauri frontend.
+//! Tracing subscriber layer that forwards log messages to the Tauri frontend
+//! and optionally writes them to a file in the current output directory.
 
-use std::sync::OnceLock;
+use std::fs::{File, OpenOptions};
+use std::io::Write;
+use std::path::Path;
+use std::sync::{Arc, Mutex, OnceLock};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tracing::{Event, Subscriber};
+use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::layer::{Context, Layer};
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::registry::LookupSpan;
@@ -15,6 +20,7 @@ pub struct LogEntry {
 }
 
 static LOG_SENDER: OnceLock<UnboundedSender<LogEntry>> = OnceLock::new();
+static LOG_FILE: OnceLock<Arc<Mutex<Option<File>>>> = OnceLock::new();
 
 /// Tracing layer that captures log events and sends them to the frontend.
 pub struct TauriLogLayer;
@@ -33,11 +39,29 @@ where
             return;
         }
 
+        // Forward to frontend.
         if let Some(tx) = LOG_SENDER.get() {
             let _ = tx.send(LogEntry {
-                level,
-                message: visitor.message,
+                level: level.clone(),
+                message: visitor.message.clone(),
             });
+        }
+
+        // Also append to the configured log file, if any.
+        if let Some(log_file_holder) = LOG_FILE.get() {
+            if let Ok(mut guard) = log_file_holder.lock() {
+                if let Some(file) = guard.as_mut() {
+                    let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f");
+                    let line = format!(
+                        "[{}] [{}] {}\n",
+                        timestamp,
+                        level.to_uppercase(),
+                        visitor.message
+                    );
+                    let _ = file.write_all(line.as_bytes());
+                    let _ = file.flush();
+                }
+            }
         }
     }
 }
@@ -67,10 +91,44 @@ pub fn init_logging() -> anyhow::Result<UnboundedReceiver<LogEntry>> {
         .set(tx)
         .map_err(|_| anyhow::anyhow!("Logging already initialized"))?;
 
-    let subscriber = tracing_subscriber::registry().with(TauriLogLayer);
+    // Initialize the file holder so it can be configured later.
+    let _ = LOG_FILE.set(Arc::new(Mutex::new(None)));
+
+    let subscriber = tracing_subscriber::registry()
+        .with(TauriLogLayer)
+        .with(LevelFilter::INFO);
 
     tracing::subscriber::set_global_default(subscriber)
         .map_err(|e| anyhow::anyhow!("Failed to set tracing subscriber: {}", e))?;
 
     Ok(rx)
+}
+
+/// Configure the subscriber to also append log entries to `path`.
+/// Creates the parent directory and the file if necessary.
+pub fn set_log_file<P: AsRef<Path>>(path: P) -> anyhow::Result<()> {
+    let path = path.as_ref();
+    if let Some(parent) = path.parent() {
+        if !parent.exists() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| anyhow::anyhow!("Failed to create log directory: {}", e))?;
+        }
+    }
+
+    let file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|e| anyhow::anyhow!("Failed to open log file: {}", e))?;
+
+    let holder = LOG_FILE.get_or_init(|| Arc::new(Mutex::new(None)));
+    *holder.lock().unwrap() = Some(file);
+    Ok(())
+}
+
+/// Stop writing logs to the currently configured file.
+pub fn clear_log_file() {
+    if let Some(holder) = LOG_FILE.get() {
+        *holder.lock().unwrap() = None;
+    }
 }

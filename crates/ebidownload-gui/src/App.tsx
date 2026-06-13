@@ -59,12 +59,14 @@ function App() {
   const [metadata, setMetadata] = useState<EnaRecord[]>([]);
   const [isDownloading, setIsDownloading] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
-  const [downloadProgress, setDownloadProgress] = useState<Record<string, { percent: number; status: string }>>({});
+  const [isPaused, setIsPaused] = useState(false);
+  const [downloadProgress, setDownloadProgress] = useState<Record<string, { percent: number; status: string; speed_mbps: number }>>({});
   const [globalProgress, setGlobalProgress] = useState<{ total: number; completed: number; percent: number } | null>(null);
   const [uploadProgress, setUploadProgress] = useState<Record<string, { percent: number; status: string }>>({});
   const [logs, setLogs] = useState<{ level: string; message: string; time: string }[]>([]);
   const [logLevelFilter, setLogLevelFilter] = useState<string>('info');
   const [metadataExpanded, setMetadataExpanded] = useState(true);
+  const [downloadConfigCollapsed, setDownloadConfigCollapsed] = useState(false);
   const [depStatus, setDepStatus] = useState<'checking' | 'ready' | 'missing'>('checking');
   const [depInfo, setDepInfo] = useState<DepStatus | null>(null);
   const [isInstallingDeps, setIsInstallingDeps] = useState(false);
@@ -235,10 +237,15 @@ function App() {
     setLogs(prev => [...prev.slice(-100), { level, message, time }]);
   };
 
-  const updateGlobalProgress = (nextProgress: Record<string, { percent: number; status: string }>, totalCount: number) => {
-    const completedCount = Object.values(nextProgress).filter(p => p.status === 'Completed').length;
-    const percent = totalCount > 0 ? (completedCount / totalCount) * 100 : 0;
-    setGlobalProgress({ total: totalCount, completed: completedCount, percent });
+  const updateGlobalProgress = (nextProgress: Record<string, { percent: number; status: string; speed_mbps: number }>, totalCount: number) => {
+    const entries = Object.values(nextProgress);
+    const completedCount = entries.filter(p => p.status === 'Completed').length;
+    // Smooth overall progress based on the average percentage of all runs,
+    // instead of counting how many runs have fully completed.
+    const avgPercent = entries.length > 0
+      ? entries.reduce((sum, p) => sum + p.percent, 0) / entries.length
+      : 0;
+    setGlobalProgress({ total: totalCount, completed: completedCount, percent: avgPercent });
   };
 
   const handleDownloadEvent = (event: DownloadEvent) => {
@@ -253,6 +260,7 @@ function App() {
             [event.data.run_id]: {
               percent: event.data.percent,
               status: event.data.status,
+              speed_mbps: event.data.speed_mbps ?? 0,
             },
           };
           const totalCount = Object.keys(next).length;
@@ -267,10 +275,14 @@ function App() {
         break;
       case 'Completed':
         setIsDownloading(false);
+        setIsPaused(false);
+        setDownloadConfigCollapsed(false);
         addLog('info', 'Download completed successfully');
         break;
       case 'Error':
         setIsDownloading(false);
+        setIsPaused(false);
+        setDownloadConfigCollapsed(false);
         addLog('error', event.data.message);
         break;
       case 'Metadata':
@@ -326,11 +338,39 @@ function App() {
     }
   };
 
+  const handlePauseDownload = async () => {
+    try {
+      const nextPaused = !isPaused;
+      await invoke('pause_download_command', { paused: nextPaused });
+      setIsPaused(nextPaused);
+      addLog('info', nextPaused ? 'Download paused' : 'Download resumed');
+    } catch (e) {
+      addLog('error', `Failed to pause/resume download: ${e}`);
+    }
+  };
+
+  const handleCancelDownload = async () => {
+    try {
+      await invoke('cancel_download_command');
+      setIsPaused(false);
+      addLog('info', 'Download cancelled');
+    } catch (e) {
+      addLog('error', `Failed to cancel download: ${e}`);
+    }
+  };
+
   const handleStartDownload = async () => {
     if (!downloadForm.output) {
       addLog('error', 'Please select an output directory');
       return;
     }
+
+    // Reset pause state on a fresh download.
+    setIsPaused(false);
+
+    // Collapse configuration cards and expand the progress panel.
+    setDownloadConfigCollapsed(true);
+    setMetadataExpanded(true);
 
     try {
       const splitFilters = (s: string) => s.split(/[,\n]/).map(item => item.trim()).filter(item => item !== '');
@@ -565,8 +605,13 @@ function App() {
             progress={downloadProgress}
             globalProgress={globalProgress}
             isDownloading={isDownloading}
+            isPaused={isPaused}
+            configCollapsed={downloadConfigCollapsed}
+            setConfigCollapsed={setDownloadConfigCollapsed}
             onFetchMetadata={handleFetchMetadata}
             onStartDownload={handleStartDownload}
+            onPauseDownload={handlePauseDownload}
+            onCancelDownload={handleCancelDownload}
             selectFile={selectFile}
             selectDirectory={selectDirectory}
             metadataExpanded={metadataExpanded}
@@ -664,8 +709,13 @@ function DownloadTab({
   progress,
   globalProgress,
   isDownloading,
+  isPaused,
+  configCollapsed,
+  setConfigCollapsed,
   onFetchMetadata,
   onStartDownload,
+  onPauseDownload,
+  onCancelDownload,
   selectFile,
   selectDirectory,
   metadataExpanded,
@@ -709,6 +759,8 @@ function DownloadTab({
 
   return (
     <div className="download-tab">
+      {!configCollapsed && (
+        <>
       <div className="grid-2">
         <div className="card">
           <div className="card-title">
@@ -901,8 +953,26 @@ function DownloadTab({
           </div>
         </div>
       </div>
+        </>
+      )}
 
       <div style={{ display: 'flex', gap: '1rem', justifyContent: 'flex-end', marginBottom: '2rem' }}>
+        {configCollapsed && !isDownloading && (
+          <button
+            className="btn btn-secondary"
+            onClick={() => setConfigCollapsed(false)}
+          >
+            Show settings
+          </button>
+        )}
+        {!configCollapsed && isDownloading && (
+          <button
+            className="btn btn-secondary"
+            onClick={() => setConfigCollapsed(true)}
+          >
+            Hide settings
+          </button>
+        )}
         <button
           className="btn btn-secondary"
           onClick={onFetchMetadata}
@@ -910,6 +980,22 @@ function DownloadTab({
         >
           Check Records
         </button>
+        {isDownloading && (
+          <>
+            <button
+              className="btn btn-warning"
+              onClick={onPauseDownload}
+            >
+              {isPaused ? 'Resume' : 'Pause'}
+            </button>
+            <button
+              className="btn btn-danger"
+              onClick={onCancelDownload}
+            >
+              Stop
+            </button>
+          </>
+        )}
         <button
           className="btn btn-primary"
           onClick={onStartDownload}
@@ -1007,7 +1093,14 @@ function DownloadTab({
                               <span className={`status-badge ${getStatusClass(progress[record.run_accession].status)}`}>
                                 {progress[record.run_accession].status}
                               </span>
-                              <span>{Math.round(progress[record.run_accession].percent)}%</span>
+                              <span>
+                                {Math.round(progress[record.run_accession].percent)}%
+                                {progress[record.run_accession].speed_mbps > 0 && (
+                                  <span style={{ marginLeft: '0.5rem', color: 'var(--text-muted)' }}>
+                                    {progress[record.run_accession].speed_mbps.toFixed(1)} MB/s
+                                  </span>
+                                )}
+                              </span>
                             </div>
                             <div className="progress-bar-container">
                               <div
@@ -1060,6 +1153,20 @@ function UploadTab({
 
   return (
     <div className="upload-tab">
+      <div className="card" style={{ marginBottom: '1.5rem', borderLeft: '4px solid #f59e0b', backgroundColor: 'rgba(245, 158, 11, 0.08)' }}>
+        <div className="card-title" style={{ color: '#f59e0b' }}>
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path>
+            <line x1="12" y1="9" x2="12" y2="13"></line>
+            <line x1="12" y1="17" x2="12.01" y2="17"></line>
+          </svg>
+          Experimental Feature
+        </div>
+        <p style={{ fontSize: '0.875rem', color: 'var(--text-muted)', margin: 0 }}>
+          The upload feature is still under testing. Please verify your uploads and use with caution.
+        </p>
+      </div>
+
       <div className="grid-2">
         <div className="card">
           <div className="card-title">

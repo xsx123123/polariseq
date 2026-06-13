@@ -420,6 +420,7 @@ async fn run_download(args: &DownloadArgs, cli: &Cli) -> Result<()> {
 // ============================================================
 
 async fn run_upload(args: &UploadArgs) -> Result<()> {
+    warn!("⚠️  The upload subcommand is still under testing. Use with caution.");
     ebidownload_core::upload::run_upload(
         &args.bucket,
         &args.prefix,
