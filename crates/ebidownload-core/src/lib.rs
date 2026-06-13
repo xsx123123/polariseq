@@ -321,7 +321,7 @@ pub fn process_records(
         let fastq_ftp_1_url = ftp_urls[0].to_string();
         let fastq_ftp_1_name = fastq_ftp_1_url.rsplit('/').next().unwrap_or("").to_string();
         let fastq_md5_1 = md5s[0].to_string();
-        let fastq_bytes_1 = *sizes.get(0).unwrap_or(&0);
+        let fastq_bytes_1 = *sizes.first().unwrap_or(&0);
 
         let (fastq_ftp_2_url, fastq_ftp_2_name, fastq_md5_2, fastq_bytes_2) =
             if ftp_urls.len() >= 2 && md5s.len() >= 2 {

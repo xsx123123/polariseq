@@ -222,7 +222,7 @@ impl ResumableDownloader {
         max_workers: usize,
         mp: Option<Arc<MultiProgress>>,
     ) -> Result<Self> {
-        let raw_name = metadata.s3_uri.split('/').last().unwrap_or(&run_id).to_string();
+        let raw_name = metadata.s3_uri.split('/').next_back().unwrap_or(&run_id).to_string();
         let filename = if raw_name.ends_with(".sra") { raw_name } else { format!("{}.sra", raw_name) };
         let filepath = save_dir.join(&filename);
         let meta_file = filepath.with_extension("meta.json");
@@ -293,7 +293,7 @@ impl ResumableDownloader {
         }
         
         let mut downloaded_chunks = self.load_progress();
-        let num_chunks = (self.metadata.size + self.chunk_size - 1) / self.chunk_size;
+        let num_chunks = self.metadata.size.div_ceil(self.chunk_size);
         let mut tasks = Vec::new();
         for i in 0..num_chunks {
             if !downloaded_chunks.contains(&(i as usize)) {
@@ -378,7 +378,7 @@ impl ResumableDownloader {
                     match task {
                         Some(t) => {
                             match download_chunk_http(client.clone(), &url, &t, &filepath, gb_clone.clone(), pause_token_worker.clone()).await {
-                                Ok(_) => { if let Err(_) = tx.send(Ok(t.id)).await { break; } },
+                                Ok(_) => { if tx.send(Ok(t.id)).await.is_err() { break; } },
                                 Err(e) => { let _ = tx.send(Err(e)).await; }
                             }
                         }
@@ -485,47 +485,44 @@ async fn download_chunk_http(
         let range_header = format!("bytes={}-{}", current_offset, chunk.end);
         let resp = client.get(url).header(header::RANGE, range_header).send().await;
 
-        match resp {
-            Ok(response) => {
-                if !response.status().is_success() {
-                    retry += 1;
-                    if retry > 10 { return Err(anyhow!("HTTP Status {}", response.status())); }
-                    tokio::time::sleep(Duration::from_secs(retry)).await;
-                    continue;
-                }
-                let mut stream = response.bytes_stream();
-                let mut file = std::fs::OpenOptions::new().write(true).open(filepath)?;
-                file.seek(SeekFrom::Start(current_offset))?;
-                
-                let mut stream_error = false;
-                let offset_start = current_offset;
+        if let Ok(response) = resp {
+            if !response.status().is_success() {
+                retry += 1;
+                if retry > 10 { return Err(anyhow!("HTTP Status {}", response.status())); }
+                tokio::time::sleep(Duration::from_secs(retry)).await;
+                continue;
+            }
+            let mut stream = response.bytes_stream();
+            let mut file = std::fs::OpenOptions::new().write(true).open(filepath)?;
+            file.seek(SeekFrom::Start(current_offset))?;
+            
+            let mut stream_error = false;
+            let offset_start = current_offset;
 
-                while let Some(item) = stream.next().await {
-                    // Check pause inside the byte stream loop so an active
-                    // HTTP connection also stops downloading immediately.
-                    if let Some(token) = &pause_token {
-                        token.wait_while_paused().await;
-                    }
-
-                    match item {
-                        Ok(bytes) => {
-                            if let Err(_) = file.write_all(&bytes) { stream_error = true; break; }
-                            let len = bytes.len() as u64;
-                            global_bytes.fetch_add(len, Ordering::Relaxed);
-                            current_offset += len;
-                        }
-                        Err(_) => { stream_error = true; break; }
-                    }
+            while let Some(item) = stream.next().await {
+                // Check pause inside the byte stream loop so an active
+                // HTTP connection also stops downloading immediately.
+                if let Some(token) = &pause_token {
+                    token.wait_while_paused().await;
                 }
-                
-                if !stream_error && current_offset > chunk.end { return Ok(()); }
-                
-                // If we made progress, reset retry counter
-                if current_offset > offset_start {
-                    retry = 0;
+
+                match item {
+                    Ok(bytes) => {
+                        if file.write_all(&bytes).is_err() { stream_error = true; break; }
+                        let len = bytes.len() as u64;
+                        global_bytes.fetch_add(len, Ordering::Relaxed);
+                        current_offset += len;
+                    }
+                    Err(_) => { stream_error = true; break; }
                 }
             }
-            Err(_) => {}
+            
+            if !stream_error && current_offset > chunk.end { return Ok(()); }
+            
+            // If we made progress, reset retry counter
+            if current_offset > offset_start {
+                retry = 0;
+            }
         }
 
         retry += 1;
