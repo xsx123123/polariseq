@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+- **Missing Data Sync Detection**: When ENA/GEO metadata is available but no FASTQ/SRA files are downloadable (e.g., data not yet synced from GEO to SRA/ENA), the tool now reports a clear warning instead of printing "Download completed successfully".
+
 ## [1.4.0] - 2026-06-12
 
 ### Added
