@@ -2,3 +2,25 @@
 software:
   prefetch : /home/zj/.local/share/mamba/envs/sra/bin/prefetch
   fasterq_dump : /home/zj/.local/share/mamba/envs/sra/bin/fasterq-dump
+# Public data
+public_data:
+  ncbi_nt:
+    s3_url: s3://ncbi-blast-databases/2026-07-10-12-55-02/
+    description: "NCBI nt database"
+    database_type: folder
+    exclude: "*"
+    include: "nt.*"
+  ncbi_nr:
+    s3_url: s3://ncbi-blast-databases/2026-07-10-12-55-02/
+    description: "NCBI nr database"
+    database_type: folder
+    exclude: "*"
+    include: "nr.*"
+  k2_viral:
+    s3_url: s3://genome-idx/kraken/k2_viral_20240112.tar.gz
+    description: "kraken viral database"
+    database_type: file
+  k2_nt:
+    s3_url: s3://genome-idx/kraken/k2_nt_20231129.tar.gz
+    description: "kraken nt database"
+    database_type: file

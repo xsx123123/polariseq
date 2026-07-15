@@ -21,6 +21,7 @@ By default, EBIDownload utilizes **AWS S3 global acceleration** to achieve ultra
 - **Smooth Overall Progress**: Overall progress is now computed from the average percentage across all runs instead of counting completed runs.
 - **Upload marked experimental**: Both CLI and GUI now warn that the upload subcommand is still under testing.
 - **Clean script rewritten in Python**: `clean.sh` has been replaced with `clean.py` for cross-platform cleanup.
+- **Public S3 reference databases**: The `public-data` command downloads one YAML-selected public database at a time, with anonymous S3 access, resumable HTTP ranges, object filtering, and dry-run preview.
 
 ![EBIDownload GUI](./docs/GUI.png)
 
@@ -36,6 +37,7 @@ By default, EBIDownload utilizes **AWS S3 global acceleration** to achieve ultra
 - **Flexible Usage**: Supports direct downloads via project accession numbers or TSV file lists.
 - **Resumable Downloads**: Supports resumable downloads in `aws` and `prefetch` modes, ensuring download continuity.
 - **Smart Auto-Fallback**: Automatically attempts AWS S3 first and seamlessly switches to Prefetch if the AWS download fails (Mode: `auto`).
+- **Public Reference Data Downloads**: Download configured NCBI BLAST, Kraken, or other public S3 databases with file-level and range-level concurrency.
 - **Advanced Filtering**: Supports Regex-based filtering to precisely include or exclude specific samples or runs.
 - **Real-time Progress (GUI)**: Visual progress bars, per-run download speed, smooth overall progress, download queue management, and live log streaming in the desktop application.
 - **Pause / Stop Downloads (GUI)**: Pause and resume AWS downloads, or stop any in-progress download.
@@ -275,8 +277,7 @@ jobs:
 
 This program uses a YAML file to configure the paths for external tools, including `sra-tools` (`prefetch`, `fasterq-dump`).
 
-**Default location**: `~/.EBIDownload/EBIDownload.yaml`.
-The file is created automatically on first launch if it does not exist, and it is reloaded on startup.
+**CLI default location**: `EBIDownload.yaml` beside the `EBIDownload` executable. Use the global `-y, --yaml <FILE>` option to choose another path. If the default file is absent, the CLI reports the exact path it attempted to load.
 
 `sra-tools` paths are optional: if they are not present in the YAML file, EBIDownload falls back to a managed installation (created by `EBIDownload deps install` or the GUI's startup install dialog) and finally to executables found in your `PATH`.
 
@@ -289,6 +290,19 @@ Below is the standard format for the `EBIDownload.yaml` file:
 software:
   prefetch: /path/to/your/prefetch
   fasterq_dump: /path/to/your/fasterq-dump
+
+public_data:
+  ncbi_nt:
+    s3_url: s3://ncbi-blast-databases/2026-07-10-12-55-02/
+    description: "NCBI nt database"
+    database_type: folder
+    exclude: "*"
+    include: "nt.*"
+
+  k2_viral:
+    s3_url: s3://genome-idx/kraken/k2_viral_20240112.tar.gz
+    description: "Kraken2 viral database"
+    database_type: file
 ```
 
 **Important Notes**:
@@ -369,7 +383,37 @@ A circular **theme toggle button** in the top-right corner of the header switche
 
 **Note**: The `-A` and `-T` options are typically mutually exclusive and are used to specify the data source to download.
 
-#### b. Example
+#### b. Public Reference Data from S3
+
+`public-data` reads the `public_data` map from `EBIDownload.yaml`. You must select exactly one YAML identifier with `--name`; running `public-data` without arguments prints help and never downloads every configured entry.
+
+```bash
+# Download the YAML entry named ncbi_nt
+./target/release/EBIDownload public-data --name ncbi_nt --output ./dbs
+
+# Override the default YAML location
+./target/release/EBIDownload public-data -y /path/to/databases.yaml --name k2_viral --output ./dbs
+
+# Preview matching objects without downloading data
+./target/release/EBIDownload public-data --name ncbi_nt --dry-run
+
+# Tune file concurrency, per-file HTTP ranges, and range size (MiB)
+./target/release/EBIDownload public-data --name k2_viral -p 4 -t 2 --chunk-size 32 --output ./dbs
+```
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `-n`, `--name` | Required key in the YAML `public_data` map, such as `ncbi_nt` | — |
+| `-o`, `--output` | Directory for downloaded database files | `.` |
+| `-p`, `--multithreads` | Concurrent files for folder sources | `8` |
+| `-t`, `--aws-threads` | Concurrent HTTP range requests per file | `4` |
+| `--chunk-size` | HTTP range size in MiB | `64` |
+| `--dry-run` | List matching objects and sizes without downloading | `false` |
+| `-y`, `--yaml` | Global override for the YAML configuration path | Executable directory |
+
+Folder sources use `exclude` first and then `include` as an override. For example, `exclude: "*"` together with `include: "nt.*"` downloads only `nt.*` objects below the configured S3 prefix. Each object uses its own `.meta.json` file for resumable transfer; it is removed when the download completes.
+
+#### c. Download Examples
 
 **1. AWS S3 High-Speed Mode (Most Recommended)**
 

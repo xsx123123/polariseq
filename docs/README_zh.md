@@ -412,6 +412,7 @@ EBIDownload <command> [options]
 | 子命令 | 描述 |
 |--------|------|
 | `download` | 从 EBI ENA / NCBI SRA 下载测序数据（原有功能） |
+| `public-data` | 从 YAML 配置的公开 S3 bucket 下载参考数据库（支持分片续传） |
 | `upload` | 上传测序数据至 AWS S3 用于 NCBI SRA 提交（新功能） |
 
 **注意**：如果你之前使用的是扁平化命令格式（如 `EBIDownload -A PRJNA1251654 -o ./data`），现在需要添加 `download` 子命令：
@@ -428,7 +429,41 @@ EBIDownload download -A PRJNA1251654 -o ./data -d aws
 
 ---
 
-## 8. HTTP 进度 API（加密）
+## 8. 公共参考数据库下载
+
+`public-data` 从 `EBIDownload.yaml` 的 `public_data` 配置中读取公开 S3 数据库。`folder` 类型会列举并按 `exclude` / `include` 通配符过滤前缀下的对象；`file` 类型下载单个对象。下载使用匿名 S3 列举和 HTTP Range 分片续传，每个目标文件都会保留独立的 `.meta.json` 进度文件，重新运行相同命令即可继续未完成下载。
+
+```yaml
+public_data:
+  ncbi_nt:
+    s3_url: s3://ncbi-blast-databases/2026-07-10-12-55-02/
+    description: "NCBI nt database"
+    database_type: folder
+    exclude: "*"
+    include: "nt.*"
+
+  k2_viral:
+    s3_url: s3://genome-idx/kraken/k2_viral_20240112.tar.gz
+    description: "Kraken2 viral database"
+    database_type: file
+```
+
+```bash
+# `--name` 必填，按 YAML 中的标识下载一个数据库
+EBIDownload public-data --name ncbi_nt --output ./dbs
+
+# 调整为 4 个文件并发、每个文件 2 个 Range 请求、32 MiB 分片
+EBIDownload public-data --name k2_viral --output ./dbs -p 4 -t 2 --chunk-size 32
+
+# 预览 folder 条目中会匹配的对象和大小，不下载数据
+EBIDownload public-data --name ncbi_nt --dry-run
+```
+
+`public-data` 不带参数时会直接显示帮助；`--name` 是必填参数，必须是 YAML `public_data` 中的键（例如 `ncbi_nt`、`ncbi_nr` 或 `k2_viral`），不会再默认下载全部条目。未传 `-y/--yaml` 时，程序会加载可执行文件同目录的 `EBIDownload.yaml`；该文件不存在时会明确报错。需要其他配置文件时使用全局参数，例如 `EBIDownload public-data -y /path/to/custom.yaml --name ncbi_nt`。默认并发为 8 个文件同时下载、每个文件 4 个 HTTP 分片、每个分片 64 MiB。对于 `exclude: "*"` 与 `include: "nt.*"` 的组合，`include` 会在排除规则之后重新包含匹配的 `nt.*` 文件。
+
+---
+
+## 9. HTTP 进度 API（加密）
 
 EBIDownload CLI 提供可选的 **HTTP 进度 API**，允许外部平台实时查询下载进度。进度数据使用 **AES-256-GCM** 加密以确保安全。
 

@@ -1,23 +1,23 @@
-use anyhow::{anyhow, Result};
 use crate::progress::{transfer_bar_style, verify_bar_style};
 use crate::progress_store::ProgressStore;
+use anyhow::{anyhow, Result};
+use futures::StreamExt;
 use indicatif::{MultiProgress, ProgressBar};
 use md5;
 use quick_xml::events::Event;
 use quick_xml::Reader;
+use reqwest::{header, Client};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::Duration;
-use tokio::sync::{Mutex, mpsc}; 
-use tokio::io::AsyncReadExt; 
 use std::str;
-use reqwest::{Client, header};
-use futures::StreamExt;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::io::AsyncReadExt;
+use tokio::sync::{mpsc, Mutex};
 use tracing::{info, warn};
 
 // ============================
@@ -26,8 +26,8 @@ use tracing::{info, warn};
 
 #[derive(Debug, Clone)]
 pub struct SraMetadata {
-    pub s3_uri: String,   
-    pub http_url: String, 
+    pub s3_uri: String,
+    pub http_url: String,
     pub md5: Option<String>,
     pub size: u64,
 }
@@ -88,11 +88,9 @@ impl SraUtils {
             "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=sra&id={}&rettype=full&retmode=xml",
             run_id
         );
-        
+
         // 🟢 Modification 1: Timeout increased to 60 seconds
-        let client = Client::builder()
-            .timeout(Duration::from_secs(60)) 
-            .build()?;
+        let client = Client::builder().timeout(Duration::from_secs(60)).build()?;
 
         let mut attempt = 0;
         let max_retries = 10; // 🟢 Modification 2: Max retries increased to 10
@@ -110,15 +108,27 @@ impl SraUtils {
                         if attempt >= max_retries {
                             return Err(anyhow!("NCBI API Error: Status {}", resp.status()));
                         }
-                        warn!("⚠️  [Network] NCBI Server Error ({}), retrying ({}/{})...", resp.status(), attempt, max_retries);
+                        warn!(
+                            "⚠️  [Network] NCBI Server Error ({}), retrying ({}/{})...",
+                            resp.status(),
+                            attempt,
+                            max_retries
+                        );
                     }
-                },
+                }
                 Err(e) => {
                     if attempt >= max_retries {
-                        return Err(anyhow!("Failed to connect to NCBI after {} attempts: {}", max_retries, e));
+                        return Err(anyhow!(
+                            "Failed to connect to NCBI after {} attempts: {}",
+                            max_retries,
+                            e
+                        ));
                     }
                     // 🟢 Modification 3: Retry wait time increased to 10 seconds (more stable)
-                    warn!("⚠️  [Network] Connection failed: {}. Retrying in 10s ({}/{})...", e, attempt, max_retries);
+                    warn!(
+                        "⚠️  [Network] Connection failed: {}. Retrying in 10s ({}/{})...",
+                        e, attempt, max_retries
+                    );
                 }
             }
 
@@ -160,14 +170,18 @@ fn parse_sra_xml(xml_text: &str) -> Result<Option<SraMetadata>> {
             Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => {
                 let name = e.local_name();
                 let name_str = str::from_utf8(name.as_ref()).unwrap_or("");
-                if name_str.eq_ignore_ascii_case("SRAFile") || name_str.eq_ignore_ascii_case("Run") {
+                if name_str.eq_ignore_ascii_case("SRAFile") || name_str.eq_ignore_ascii_case("Run")
+                {
                     current_file_md5 = None;
                     current_file_size = 0;
                     for attr in e.attributes().flatten() {
                         let k = str::from_utf8(attr.key.as_ref()).unwrap_or("");
                         let v = str::from_utf8(attr.value.as_ref()).unwrap_or("");
-                        if k.eq_ignore_ascii_case("md5") { current_file_md5 = Some(v.to_string()); }
-                        else if k.eq_ignore_ascii_case("size") { current_file_size = v.parse().unwrap_or(0); }
+                        if k.eq_ignore_ascii_case("md5") {
+                            current_file_md5 = Some(v.to_string());
+                        } else if k.eq_ignore_ascii_case("size") {
+                            current_file_size = v.parse().unwrap_or(0);
+                        }
                     }
                 } else if name_str.eq_ignore_ascii_case("Alternatives") {
                     let mut is_aws = false;
@@ -176,9 +190,15 @@ fn parse_sra_xml(xml_text: &str) -> Result<Option<SraMetadata>> {
                     for attr in e.attributes().flatten() {
                         let k = str::from_utf8(attr.key.as_ref()).unwrap_or("");
                         let v = str::from_utf8(attr.value.as_ref()).unwrap_or("");
-                        if k.eq_ignore_ascii_case("org") && v.eq_ignore_ascii_case("AWS") { is_aws = true; }
-                        else if k.eq_ignore_ascii_case("free_egress") && v.eq_ignore_ascii_case("worldwide") { is_worldwide = true; }
-                        else if k.eq_ignore_ascii_case("url") { curr_url = v.to_string(); }
+                        if k.eq_ignore_ascii_case("org") && v.eq_ignore_ascii_case("AWS") {
+                            is_aws = true;
+                        } else if k.eq_ignore_ascii_case("free_egress")
+                            && v.eq_ignore_ascii_case("worldwide")
+                        {
+                            is_worldwide = true;
+                        } else if k.eq_ignore_ascii_case("url") {
+                            curr_url = v.to_string();
+                        }
                     }
                     if is_aws && is_worldwide && !curr_url.is_empty() {
                         if let Some((s3_uri, http_url)) = resolve_urls(&curr_url) {
@@ -188,10 +208,10 @@ fn parse_sra_xml(xml_text: &str) -> Result<Option<SraMetadata>> {
                                 md5: current_file_md5.clone(),
                                 size: current_file_size,
                             });
-                            break; 
+                            break;
                         }
                     }
-                } 
+                }
             }
             Ok(Event::Eof) => break,
             _ => {}
@@ -225,8 +245,13 @@ impl ResumableDownloader {
         mp: Option<Arc<MultiProgress>>,
         progress_store: Option<ProgressStore>,
     ) -> Result<Self> {
-        let raw_name = metadata.s3_uri.split('/').next_back().unwrap_or(&run_id).to_string();
-        let filename = if raw_name.ends_with(".sra") { raw_name } else { format!("{}.sra", raw_name) };
+        let filename = metadata
+            .s3_uri
+            .split('/')
+            .next_back()
+            .filter(|name| !name.is_empty())
+            .unwrap_or(&run_id)
+            .to_string();
         let filepath = save_dir.join(&filename);
         let meta_file = filepath.with_extension("meta.json");
 
@@ -237,7 +262,19 @@ impl ResumableDownloader {
             .pool_max_idle_per_host(max_workers)
             .build()?;
 
-        Ok(Self { run_id, metadata, filepath, meta_file, chunk_size: chunk_size_mb * 1024 * 1024, max_workers, client, mp, progress_bytes: None, pause_token: None, progress_store })
+        Ok(Self {
+            run_id,
+            metadata,
+            filepath,
+            meta_file,
+            chunk_size: chunk_size_mb * 1024 * 1024,
+            max_workers,
+            client,
+            mp,
+            progress_bytes: None,
+            pause_token: None,
+            progress_store,
+        })
     }
 
     pub fn with_progress_bytes(mut self, progress: Arc<AtomicU64>) -> Self {
@@ -262,7 +299,9 @@ impl ResumableDownloader {
         HashSet::new()
     }
     fn save_progress(&self, downloaded_chunks: &HashSet<usize>) -> Result<()> {
-        let progress_data = ProgressData { downloaded_chunks: downloaded_chunks.iter().cloned().collect() };
+        let progress_data = ProgressData {
+            downloaded_chunks: downloaded_chunks.iter().cloned().collect(),
+        };
         let content = serde_json::to_string(&progress_data)?;
         std::fs::write(&self.meta_file, content)?;
         Ok(())
@@ -272,52 +311,72 @@ impl ResumableDownloader {
 
         // 🟢 Check if file exists and size matches, then verify MD5 first
         if self.filepath.exists() {
-             if let Ok(meta) = tokio::fs::metadata(&self.filepath).await {
+            if let Ok(meta) = tokio::fs::metadata(&self.filepath).await {
                 if meta.len() == self.metadata.size {
-                    let msg = format!("   📂 Found existing file with correct size: {}", self.run_id);
-                    if let Some(mp) = &self.mp { let _ = mp.println(&msg); } else { println!("{}", msg); }
-                    
+                    let msg = format!(
+                        "   📂 Found existing file with correct size: {}",
+                        self.run_id
+                    );
+                    if let Some(mp) = &self.mp {
+                        let _ = mp.println(&msg);
+                    } else {
+                        println!("{}", msg);
+                    }
+
                     // Verify integrity
                     if self.verify_integrity(0.0, true).await? {
-                         return Ok(true);
+                        return Ok(true);
                     } else {
-                         let msg = format!("   ❌ Integrity check failed for existing file. Redownloading: {}", self.run_id);
-                         if let Some(mp) = &self.mp { let _ = mp.println(&msg); } else { println!("{}", msg); }
+                        let msg = format!(
+                            "   ❌ Integrity check failed for existing file. Redownloading: {}",
+                            self.run_id
+                        );
+                        if let Some(mp) = &self.mp {
+                            let _ = mp.println(&msg);
+                        } else {
+                            println!("{}", msg);
+                        }
                     }
                 }
-             }
+            }
         }
 
         if !self.filepath.exists() {
-            if let Some(parent) = self.filepath.parent() { std::fs::create_dir_all(parent)?; }
+            if let Some(parent) = self.filepath.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
             let file = File::create(&self.filepath)?;
             file.set_len(self.metadata.size)?;
         }
-        
+
         let mut downloaded_chunks = self.load_progress();
         let num_chunks = self.metadata.size.div_ceil(self.chunk_size);
         let mut tasks = Vec::new();
         for i in 0..num_chunks {
             if !downloaded_chunks.contains(&(i as usize)) {
-                tasks.push(ChunkInfo { id: i as usize, start: i * self.chunk_size, end: std::cmp::min((i + 1) * self.chunk_size - 1, self.metadata.size - 1) });
+                tasks.push(ChunkInfo {
+                    id: i as usize,
+                    start: i * self.chunk_size,
+                    end: std::cmp::min((i + 1) * self.chunk_size - 1, self.metadata.size - 1),
+                });
             }
         }
 
         // 🟢 Setup Progress Bar
         let pb = if let Some(mp) = &self.mp {
-             mp.add(ProgressBar::new(self.metadata.size))
+            mp.add(ProgressBar::new(self.metadata.size))
         } else {
-             ProgressBar::new(self.metadata.size)
+            ProgressBar::new(self.metadata.size)
         };
         pb.set_style(transfer_bar_style());
         pb.set_prefix(self.run_id.clone());
         pb.set_message("Downloading");
         pb.enable_steady_tick(std::time::Duration::from_millis(100));
-        
+
         // Keep per-file details in the log file without cluttering active progress bars.
         let size_gb = self.metadata.size as f64 / 1024.0 / 1024.0 / 1024.0;
         let details = format!(
-            "📌 {} │ 📦 {:.2} GB │ 🔑 {} │ 💾 {}", 
+            "📌 {} │ 📦 {:.2} GB │ 🔑 {} │ 💾 {}",
             self.run_id,
             size_gb,
             self.metadata.md5.as_deref().unwrap_or("N/A"),
@@ -326,11 +385,16 @@ impl ResumableDownloader {
         info!(target: "download_detail", "{}", details);
 
         if tasks.is_empty() {
-            let msg = format!("✅ {} │ File exists, starting integrity check...", self.run_id);
+            let msg = format!(
+                "✅ {} │ File exists, starting integrity check...",
+                self.run_id
+            );
             pb.println(&msg);
             info!(target: "download_detail", "{}", msg);
             pb.finish_and_clear();
-            return self.verify_integrity(start_time.elapsed().as_secs_f64(), true).await;
+            return self
+                .verify_integrity(start_time.elapsed().as_secs_f64(), true)
+                .await;
         }
 
         let initial_bytes = downloaded_chunks.len() as u64 * self.chunk_size;
@@ -345,9 +409,9 @@ impl ResumableDownloader {
             std::cmp::min(initial_bytes, self.metadata.size),
             Ordering::Relaxed,
         );
-        
+
         pb.set_position(global_bytes.load(Ordering::Relaxed));
-        
+
         // 🟢 Spawn progress monitor
         let pb_monitor = pb.clone();
         let gb_monitor = global_bytes.clone();
@@ -370,7 +434,7 @@ impl ResumableDownloader {
             }
         });
 
-        let (tx, mut rx) = mpsc::channel(100); 
+        let (tx, mut rx) = mpsc::channel(100);
         let shared_tasks = Arc::new(Mutex::new(tasks));
         let pause_token = self.pause_token.clone();
         for _ in 0..self.max_workers {
@@ -387,12 +451,30 @@ impl ResumableDownloader {
                         token.wait_while_paused().await;
                     }
 
-                    let task = { let mut q = queue.lock().await; q.pop() };
+                    let task = {
+                        let mut q = queue.lock().await;
+                        q.pop()
+                    };
                     match task {
                         Some(t) => {
-                            match download_chunk_http(client.clone(), &url, &t, &filepath, gb_clone.clone(), pause_token_worker.clone()).await {
-                                Ok(_) => { if tx.send(Ok(t.id)).await.is_err() { break; } },
-                                Err(e) => { let _ = tx.send(Err(e)).await; }
+                            match download_chunk_http(
+                                client.clone(),
+                                &url,
+                                &t,
+                                &filepath,
+                                gb_clone.clone(),
+                                pause_token_worker.clone(),
+                            )
+                            .await
+                            {
+                                Ok(_) => {
+                                    if tx.send(Ok(t.id)).await.is_err() {
+                                        break;
+                                    }
+                                }
+                                Err(e) => {
+                                    let _ = tx.send(Err(e)).await;
+                                }
                             }
                         }
                         None => break,
@@ -400,74 +482,98 @@ impl ResumableDownloader {
                 }
             });
         }
-        drop(tx); 
+        drop(tx);
         while let Some(msg) = rx.recv().await {
             match msg {
                 Ok(chunk_id) => {
                     downloaded_chunks.insert(chunk_id);
-                    if let Err(e) = self.save_progress(&downloaded_chunks) { eprintln!("Warning: Failed to save progress: {}", e); }
-                },
+                    if let Err(e) = self.save_progress(&downloaded_chunks) {
+                        eprintln!("Warning: Failed to save progress: {}", e);
+                    }
+                }
                 Err(_e) => {}
             }
         }
-        
+
         monitor_handle.abort();
         pb.finish_and_clear();
         if downloaded_chunks.len() as u64 == num_chunks {
-            self.verify_integrity(start_time.elapsed().as_secs_f64(), false).await
+            self.verify_integrity(start_time.elapsed().as_secs_f64(), false)
+                .await
         } else {
-            let msg = format!("❌ {} │ Download incomplete. Progress saved, please retry.", self.run_id);
+            let msg = format!(
+                "❌ {} │ Download incomplete. Progress saved, please retry.",
+                self.run_id
+            );
             pb.println(&msg);
             warn!("{}", msg);
             Ok(false)
         }
     }
-    async fn verify_integrity(&self, download_duration: f64, skipped_download: bool) -> Result<bool> {
+    async fn verify_integrity(
+        &self,
+        download_duration: f64,
+        skipped_download: bool,
+    ) -> Result<bool> {
         let start_time = std::time::Instant::now();
-        if self.metadata.md5.is_none() { 
+        if self.metadata.md5.is_none() {
             let msg = format!("⚠️ {} │ No MD5 info, skipping verification", self.run_id);
-            if let Some(mp) = &self.mp { let _ = mp.println(&msg); } else { println!("{}", msg); }
+            if let Some(mp) = &self.mp {
+                let _ = mp.println(&msg);
+            } else {
+                println!("{}", msg);
+            }
             warn!("{}", msg);
-            return Ok(true); 
+            let _ = std::fs::remove_file(&self.meta_file);
+            return Ok(true);
         }
-        
+
         let pb = if let Some(mp) = &self.mp {
-             mp.add(ProgressBar::new(self.metadata.size))
+            mp.add(ProgressBar::new(self.metadata.size))
         } else {
-             ProgressBar::new(self.metadata.size)
+            ProgressBar::new(self.metadata.size)
         };
-        
+
         pb.set_style(verify_bar_style());
         pb.set_prefix(self.run_id.clone());
         pb.set_message("Verifying");
         pb.enable_steady_tick(std::time::Duration::from_millis(100));
-        
+
         let mut file = tokio::fs::File::open(&self.filepath).await?;
         let mut ctx = md5::Context::new();
-        let mut buf = vec![0u8; 1024 * 1024]; 
+        let mut buf = vec![0u8; 1024 * 1024];
         loop {
             let n = file.read(&mut buf).await?;
-            if n == 0 { break; }
+            if n == 0 {
+                break;
+            }
             ctx.consume(&buf[..n]);
             pb.inc(n as u64);
         }
         pb.finish_and_clear();
-        
+
         let local_md5 = format!("{:x}", ctx.compute());
         let expected_md5 = self.metadata.md5.as_ref().unwrap();
         if &local_md5 == expected_md5 {
             if !skipped_download {
-               let speed = (self.metadata.size as f64 / 1024.0 / 1024.0) / download_duration;
-               let msg = format!("✅ {} │ 🚀 {:.2} MB/s", self.run_id, speed);
-               info!(target: "download_detail", "{}", msg);
+                let speed = (self.metadata.size as f64 / 1024.0 / 1024.0) / download_duration;
+                let msg = format!("✅ {} │ 🚀 {:.2} MB/s", self.run_id, speed);
+                info!(target: "download_detail", "{}", msg);
             }
-            let msg = format!("✅ {} │ 🔍 MD5 OK ({:.2}s)", self.run_id, start_time.elapsed().as_secs_f64());
+            let msg = format!(
+                "✅ {} │ 🔍 MD5 OK ({:.2}s)",
+                self.run_id,
+                start_time.elapsed().as_secs_f64()
+            );
             info!(target: "download_detail", "{}", msg);
 
             let _ = std::fs::remove_file(&self.meta_file);
             Ok(true)
         } else {
-            let msg = format!("❌ {} │ MD5 mismatch! Local: {}  Remote: {}", self.run_id, local_md5, expected_md5);
+            let msg = format!(
+                "❌ {} │ MD5 mismatch! Local: {}  Remote: {}",
+                self.run_id, local_md5, expected_md5
+            );
             warn!("{}", msg);
             Ok(false)
         }
@@ -496,19 +602,25 @@ async fn download_chunk_http(
         }
 
         let range_header = format!("bytes={}-{}", current_offset, chunk.end);
-        let resp = client.get(url).header(header::RANGE, range_header).send().await;
+        let resp = client
+            .get(url)
+            .header(header::RANGE, range_header)
+            .send()
+            .await;
 
         if let Ok(response) = resp {
             if !response.status().is_success() {
                 retry += 1;
-                if retry > 10 { return Err(anyhow!("HTTP Status {}", response.status())); }
+                if retry > 10 {
+                    return Err(anyhow!("HTTP Status {}", response.status()));
+                }
                 tokio::time::sleep(Duration::from_secs(retry)).await;
                 continue;
             }
             let mut stream = response.bytes_stream();
             let mut file = std::fs::OpenOptions::new().write(true).open(filepath)?;
             file.seek(SeekFrom::Start(current_offset))?;
-            
+
             let mut stream_error = false;
             let offset_start = current_offset;
 
@@ -521,17 +633,25 @@ async fn download_chunk_http(
 
                 match item {
                     Ok(bytes) => {
-                        if file.write_all(&bytes).is_err() { stream_error = true; break; }
+                        if file.write_all(&bytes).is_err() {
+                            stream_error = true;
+                            break;
+                        }
                         let len = bytes.len() as u64;
                         global_bytes.fetch_add(len, Ordering::Relaxed);
                         current_offset += len;
                     }
-                    Err(_) => { stream_error = true; break; }
+                    Err(_) => {
+                        stream_error = true;
+                        break;
+                    }
                 }
             }
-            
-            if !stream_error && current_offset > chunk.end { return Ok(()); }
-            
+
+            if !stream_error && current_offset > chunk.end {
+                return Ok(());
+            }
+
             // If we made progress, reset retry counter
             if current_offset > offset_start {
                 retry = 0;
@@ -539,8 +659,42 @@ async fn download_chunk_http(
         }
 
         retry += 1;
-        if retry > 20 { return Err(anyhow!("Chunk failed after multiple retries")); }
+        if retry > 20 {
+            return Err(anyhow!("Chunk failed after multiple retries"));
+        }
         let sleep_sec = std::cmp::min(30, 1_u64 << std::cmp::min(retry, 5));
         tokio::time::sleep(Duration::from_secs(sleep_sec)).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn keeps_the_source_object_filename_for_generic_downloads() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let downloader = ResumableDownloader::new(
+            "k2_viral".to_string(),
+            SraMetadata {
+                s3_uri: "s3://genome-idx/kraken/k2_viral_20240112.tar.gz".to_string(),
+                http_url: "https://genome-idx.s3.amazonaws.com/kraken/k2_viral_20240112.tar.gz"
+                    .to_string(),
+                md5: None,
+                size: 1,
+            },
+            temp_dir.path().to_path_buf(),
+            64,
+            1,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            downloader.filepath.file_name().unwrap(),
+            "k2_viral_20240112.tar.gz"
+        );
     }
 }

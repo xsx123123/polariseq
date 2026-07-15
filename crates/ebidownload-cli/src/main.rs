@@ -2,27 +2,26 @@ use anyhow::{anyhow, Context, Result};
 use chrono::Local;
 use clap::Parser;
 use clap::Subcommand;
-use indicatif::{MultiProgress, ProgressBar, ProgressStyle, HumanBytes};
 use csv::WriterBuilder;
+use indicatif::{HumanBytes, MultiProgress, ProgressBar, ProgressStyle};
 use regex::Regex;
 
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{ExitCode, Stdio};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 use tokio::process::Command;
 use tokio::sync::Semaphore;
-use tracing::{info, warn, error};
+use tracing::{error, info, warn};
 use tracing_subscriber::{fmt, EnvFilter};
-use std::time::Duration;
 
-use ebidownload_core::*;
 use ebidownload_core::progress_store::{
-    ProgressStore, RunProgress, RunStage, StageProgress,
-    new_progress_store,
+    new_progress_store, ProgressStore, RunProgress, RunStage, StageProgress,
 };
+use ebidownload_core::*;
 
 mod http_server;
 
@@ -73,11 +72,30 @@ struct Cli {
     #[command(subcommand)]
     command: Commands,
 
-    #[arg(short, long, global = true, default_value = "EBIDownload.yaml", value_name = "FILE", help_heading = "Global Options")]
-    yaml: PathBuf,
-    #[arg(long, global = true, default_value = "info", help = "Log level: trace/debug/info/warn/error", help_heading = "Global Options")]
+    #[arg(
+        short,
+        long,
+        global = true,
+        value_name = "FILE",
+        help = "YAML configuration path (default: EBIDownload.yaml beside the executable)",
+        help_heading = "Global Options"
+    )]
+    yaml: Option<PathBuf>,
+    #[arg(
+        long,
+        global = true,
+        default_value = "info",
+        help = "Log level: trace/debug/info/warn/error",
+        help_heading = "Global Options"
+    )]
     log_level: String,
-    #[arg(long, global = true, default_value = "text", help = "Log format: text or json", help_heading = "Global Options")]
+    #[arg(
+        long,
+        global = true,
+        default_value = "text",
+        help = "Log format: text or json",
+        help_heading = "Global Options"
+    )]
     log_format: LogFormat,
 }
 
@@ -85,6 +103,8 @@ struct Cli {
 enum Commands {
     /// Download sequencing data from EBI ENA / NCBI SRA
     Download(DownloadArgs),
+    /// Download public reference databases configured in YAML from S3
+    PublicData(PublicDataArgs),
     /// Upload sequencing data to AWS S3 for NCBI SRA submission
     Upload(UploadArgs),
     /// Manage external dependencies (sra-tools)
@@ -97,26 +117,71 @@ enum Commands {
 
 #[derive(Parser, Debug)]
 struct DownloadArgs {
-    #[arg(short = 'A', long, value_name = "ID", help = "ENA project accession, e.g. PRJNA1251654", help_heading = "Input Options")]
+    #[arg(
+        short = 'A',
+        long,
+        value_name = "ID",
+        help = "ENA project accession, e.g. PRJNA1251654",
+        help_heading = "Input Options"
+    )]
     accession: Option<String>,
-    #[arg(short = 'T', long, value_name = "FILE", help = "Path to a TSV file with run list", help_heading = "Input Options")]
+    #[arg(
+        short = 'T',
+        long,
+        value_name = "FILE",
+        help = "Path to a TSV file with run list",
+        help_heading = "Input Options"
+    )]
     tsv: Option<PathBuf>,
 
-    #[arg(short, long, value_name = "DIR", help = "Output directory for downloaded data", help_heading = "Input Options")]
+    #[arg(
+        short,
+        long,
+        value_name = "DIR",
+        help = "Output directory for downloaded data",
+        help_heading = "Input Options"
+    )]
     output: PathBuf,
 
     #[arg(short, long, default_value = "aws", help_heading = "Download Options")]
     download: DownloadMethod,
 
-    #[arg(short = 'p', long, default_value = "4", help = "File-level concurrency", help_heading = "Download Options")]
+    #[arg(
+        short = 'p',
+        long,
+        default_value = "4",
+        help = "File-level concurrency",
+        help_heading = "Download Options"
+    )]
     multithreads: usize,
-    #[arg(short = 't', long = "aws-threads", default_value = "8", help = "Threads per file (AWS/Prefetch)", help_heading = "Download Options")]
+    #[arg(
+        short = 't',
+        long = "aws-threads",
+        default_value = "8",
+        help = "Threads per file (AWS/Prefetch)",
+        help_heading = "Download Options"
+    )]
     aws_threads: usize,
-    #[arg(long = "chunk-size", default_value = "20", help = "Chunk size in MB (AWS only)", help_heading = "Download Options")]
+    #[arg(
+        long = "chunk-size",
+        default_value = "20",
+        help = "Chunk size in MB (AWS only)",
+        help_heading = "Download Options"
+    )]
     chunk_size: u64,
-    #[arg(long = "max-size", default_value = "100G", help = "Max size limit (Prefetch only)", help_heading = "Download Options")]
+    #[arg(
+        long = "max-size",
+        default_value = "100G",
+        help = "Max size limit (Prefetch only)",
+        help_heading = "Download Options"
+    )]
     prefetch_max_size: String,
-    #[arg(long = "pe-only", default_value = "false", help = "Only download Paired-End data", help_heading = "Download Options")]
+    #[arg(
+        long = "pe-only",
+        default_value = "false",
+        help = "Only download Paired-End data",
+        help_heading = "Download Options"
+    )]
     pe_only: bool,
 
     #[arg(long = "filter-sample", num_args = 1.., help = "Include samples matching regex", help_heading = "Filters")]
@@ -128,14 +193,86 @@ struct DownloadArgs {
     #[arg(long = "exclude-run", num_args = 1.., help = "Exclude runs matching regex", help_heading = "Filters")]
     exclude_run: Vec<String>,
 
-    #[arg(long, default_value = "false", help = "Remove intermediate .sra files after conversion", help_heading = "Advanced Options")]
+    #[arg(
+        long,
+        default_value = "false",
+        help = "Remove intermediate .sra files after conversion",
+        help_heading = "Advanced Options"
+    )]
     cleanup_sra: bool,
-    #[arg(long, default_value = "false", help = "Show what would be downloaded without actually downloading", help_heading = "Advanced Options")]
+    #[arg(
+        long,
+        default_value = "false",
+        help = "Show what would be downloaded without actually downloading",
+        help_heading = "Advanced Options"
+    )]
     dry_run: bool,
-    #[arg(long, value_name = "PORT", help = "Enable HTTP progress API on this port (AES-256-GCM encrypted)", help_heading = "Advanced Options")]
+    #[arg(
+        long,
+        value_name = "PORT",
+        help = "Enable HTTP progress API on this port (AES-256-GCM encrypted)",
+        help_heading = "Advanced Options"
+    )]
     progress_port: Option<u16>,
-    #[arg(long, default_value = "false", help = "Write encryption key to progress.key file in output directory (required for external platforms to decrypt progress)", help_heading = "Advanced Options")]
+    #[arg(
+        long,
+        default_value = "false",
+        help = "Write encryption key to progress.key file in output directory (required for external platforms to decrypt progress)",
+        help_heading = "Advanced Options"
+    )]
     write_progress_key: bool,
+}
+
+#[derive(Parser, Debug)]
+#[command(arg_required_else_help = true)]
+struct PublicDataArgs {
+    #[arg(
+        short = 'n',
+        long,
+        value_name = "NAME",
+        help = "YAML public_data identifier to download, e.g. ncbi_nt",
+        help_heading = "Input Options"
+    )]
+    name: String,
+    #[arg(
+        short,
+        long,
+        value_name = "DIR",
+        default_value = ".",
+        help = "Directory for downloaded public database files",
+        help_heading = "Input Options"
+    )]
+    output: PathBuf,
+    #[arg(
+        short = 'p',
+        long,
+        default_value = "8",
+        help = "File-level download concurrency",
+        help_heading = "Download Options"
+    )]
+    multithreads: usize,
+    #[arg(
+        short = 't',
+        long = "aws-threads",
+        default_value = "4",
+        help = "HTTP range workers per file",
+        help_heading = "Download Options"
+    )]
+    aws_threads: usize,
+    #[arg(
+        long = "chunk-size",
+        default_value = "64",
+        help = "HTTP range chunk size in MB",
+        help_heading = "Download Options"
+    )]
+    chunk_size: u64,
+    #[arg(
+        long,
+        default_value = "false",
+        help = "List matching objects without downloading them",
+        help_heading = "Advanced Options"
+    )]
+    dry_run: bool,
 }
 
 // ============================================================
@@ -144,24 +281,61 @@ struct DownloadArgs {
 
 #[derive(Parser, Debug)]
 struct UploadArgs {
-    #[arg(short, long, value_name = "NAME", help = "AWS S3 bucket name", help_heading = "S3 Options")]
+    #[arg(
+        short,
+        long,
+        value_name = "NAME",
+        help = "AWS S3 bucket name",
+        help_heading = "S3 Options"
+    )]
     bucket: String,
-    #[arg(long, value_name = "PREFIX", help = "S3 key prefix (subdirectory)", help_heading = "S3 Options")]
+    #[arg(
+        long,
+        value_name = "PREFIX",
+        help = "S3 key prefix (subdirectory)",
+        help_heading = "S3 Options"
+    )]
     prefix: Option<String>,
     #[arg(short = 'f', long, num_args = 1.., value_name = "FILE", help = "Files to upload", help_heading = "S3 Options")]
     files: Vec<PathBuf>,
 
-    #[arg(long, default_value = "us-east-1", help = "AWS region for the S3 bucket", help_heading = "AWS Options")]
+    #[arg(
+        long,
+        default_value = "us-east-1",
+        help = "AWS region for the S3 bucket",
+        help_heading = "AWS Options"
+    )]
     region: String,
-    #[arg(short = 'c', long, default_value = "4", help = "Concurrent file uploads", help_heading = "AWS Options")]
+    #[arg(
+        short = 'c',
+        long,
+        default_value = "4",
+        help = "Concurrent file uploads",
+        help_heading = "AWS Options"
+    )]
     concurrent: usize,
 
-    #[arg(long, default_value = "false", help = "Apply NCBI SRA submission bucket policy", help_heading = "NCBI SRA")]
+    #[arg(
+        long,
+        default_value = "false",
+        help = "Apply NCBI SRA submission bucket policy",
+        help_heading = "NCBI SRA"
+    )]
     apply_policy: bool,
-    #[arg(long, value_name = "FILE", help = "Generate SRA metadata template TSV", help_heading = "NCBI SRA")]
+    #[arg(
+        long,
+        value_name = "FILE",
+        help = "Generate SRA metadata template TSV",
+        help_heading = "NCBI SRA"
+    )]
     metadata_template: Option<PathBuf>,
 
-    #[arg(long, default_value = "false", help = "Show what would be uploaded without actually uploading", help_heading = "Advanced Options")]
+    #[arg(
+        long,
+        default_value = "false",
+        help = "Show what would be uploaded without actually uploading",
+        help_heading = "Advanced Options"
+    )]
     dry_run: bool,
 }
 
@@ -179,11 +353,28 @@ struct DepsArgs {
 enum DepsSubcommand {
     /// Install sra-tools (prefetch + fasterq-dump)
     Install {
-        #[arg(short, long, help = "sra-tools version to install", help_heading = "Install Options")]
+        #[arg(
+            short,
+            long,
+            help = "sra-tools version to install",
+            help_heading = "Install Options"
+        )]
         version: Option<String>,
-        #[arg(short, long, value_name = "URL", help = "Custom download URL for the sra-tools tarball", help_heading = "Install Options")]
+        #[arg(
+            short,
+            long,
+            value_name = "URL",
+            help = "Custom download URL for the sra-tools tarball",
+            help_heading = "Install Options"
+        )]
         url: Option<String>,
-        #[arg(short, long, value_name = "FILE", help = "Path to EBIDownload.yaml to update", help_heading = "Install Options")]
+        #[arg(
+            short,
+            long,
+            value_name = "FILE",
+            help = "Path to EBIDownload.yaml to update",
+            help_heading = "Install Options"
+        )]
         yaml: Option<PathBuf>,
     },
     /// Check whether sra-tools are available
@@ -214,15 +405,13 @@ enum LogFormat {
 /// Global MultiProgress instance shared between logging and progress bars.
 /// When progress bars are active, log messages are rendered above them via
 /// MultiProgress::println(), preventing display corruption.
-static GLOBAL_MP: std::sync::LazyLock<MultiProgress> =
-    std::sync::LazyLock::new(MultiProgress::new);
+static GLOBAL_MP: std::sync::LazyLock<MultiProgress> = std::sync::LazyLock::new(MultiProgress::new);
 
 /// Tracks whether any progress bars are currently active on GLOBAL_MP.
 /// When true, MpWriter routes through MultiProgress::println() (which draws
 /// above active bars). When false, MpWriter writes directly to stderr
 /// (because MultiProgress::println() is a no-op without active bars).
-static BARS_ACTIVE: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+static BARS_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Custom writer that routes tracing output intelligently:
 /// - Progress bars active → MultiProgress::println() (renders above bars)
@@ -260,8 +449,6 @@ impl Drop for MpWriter {
     }
 }
 
-
-
 // Network health check
 async fn check_network_health() {
     info!("🏥 Performing network connectivity check...");
@@ -270,13 +457,21 @@ async fn check_network_health() {
         ("https://eutils.ncbi.nlm.nih.gov", "NCBI API"),
         ("https://s3.amazonaws.com", "AWS S3 Endpoint"),
     ];
-    let client = match reqwest::Client::builder().timeout(Duration::from_secs(3)).build() {
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(3))
+        .build()
+    {
         Ok(c) => c,
-        Err(e) => { warn!("⚠️  Failed to initialize network checker: {}", e); return; }
+        Err(e) => {
+            warn!("⚠️  Failed to initialize network checker: {}", e);
+            return;
+        }
     };
     for (url, name) in targets {
         match client.head(url).send().await {
-            Ok(_) => { info!("   ✅ {} is reachable.", name); }
+            Ok(_) => {
+                info!("   ✅ {} is reachable.", name);
+            }
             Err(e) => {
                 warn!("   ⚠️  {} is NOT reachable! ({})", name, e);
                 if e.is_connect() || e.is_timeout() {
@@ -294,11 +489,17 @@ async fn main() -> ExitCode {
 
     let output_dir = match &cli.command {
         Commands::Download(args) => args.output.clone(),
+        Commands::PublicData(args) => args.output.clone(),
         Commands::Upload(_) | Commands::Deps(_) => PathBuf::from("."),
     };
 
-    if let Commands::Download(args) = &cli.command {
-        if let Err(e) = fs::create_dir_all(&args.output) {
+    let download_output = match &cli.command {
+        Commands::Download(args) => Some(&args.output),
+        Commands::PublicData(args) => Some(&args.output),
+        Commands::Upload(_) | Commands::Deps(_) => None,
+    };
+    if let Some(output) = download_output {
+        if let Err(e) = fs::create_dir_all(output) {
             eprintln!("❌ Failed to create output directory: {}", e);
             return ExitCode::FAILURE;
         }
@@ -306,10 +507,15 @@ async fn main() -> ExitCode {
 
     print_banner();
 
-    if let Err(e) = setup_logging(&output_dir, &cli.log_level, &cli.log_format, match &cli.command {
-        Commands::Download(args) => args.accession.as_deref(),
-        Commands::Upload(_) | Commands::Deps(_) => None,
-    }) {
+    if let Err(e) = setup_logging(
+        &output_dir,
+        &cli.log_level,
+        &cli.log_format,
+        match &cli.command {
+            Commands::Download(args) => args.accession.as_deref(),
+            Commands::PublicData(_) | Commands::Upload(_) | Commands::Deps(_) => None,
+        },
+    ) {
         eprintln!("❌ Failed to setup logging: {}", e);
         return ExitCode::FAILURE;
     }
@@ -318,26 +524,54 @@ async fn main() -> ExitCode {
 
     let result: Result<()> = async {
         match &cli.command {
-            Commands::Download(args) => {
-                run_download(args, &cli).await
-            }
-            Commands::Upload(args) => {
-                run_upload(args).await
-            }
-            Commands::Deps(args) => {
-                run_deps(args, &cli).await
-            }
+            Commands::Download(args) => run_download(args, &cli).await,
+            Commands::PublicData(args) => run_public_data(args, &cli).await,
+            Commands::Upload(args) => run_upload(args).await,
+            Commands::Deps(args) => run_deps(args, &cli).await,
         }
     }
     .await;
 
     if let Err(e) = result {
         tracing::error!("Application failed: {:?}", e);
-        eprintln!("\n❌ An error occurred. Please check the log file for detailed error information.");
+        eprintln!(
+            "\n❌ An error occurred. Please check the log file for detailed error information."
+        );
         return ExitCode::FAILURE;
     }
 
     ExitCode::SUCCESS
+}
+
+fn default_yaml_path() -> Result<PathBuf> {
+    let executable = std::env::current_exe().context("Failed to locate the EBIDownload executable")?;
+    let directory = executable.parent().ok_or_else(|| {
+        anyhow!("Failed to determine the EBIDownload executable directory")
+    })?;
+    Ok(directory.join("EBIDownload.yaml"))
+}
+
+fn yaml_path(cli: &Cli) -> Result<PathBuf> {
+    cli.yaml.clone().map(Ok).unwrap_or_else(default_yaml_path)
+}
+
+async fn run_public_data(args: &PublicDataArgs, cli: &Cli) -> Result<()> {
+    let yaml_path = yaml_path(cli)?;
+    let config = load_config(&yaml_path).with_context(|| {
+        format!(
+            "Failed to load public data config {}",
+            yaml_path.display()
+        )
+    })?;
+    let downloader = ebidownload_core::public_data::PublicDataDownloader::new()
+        .await?
+        .with_workers(args.multithreads, args.aws_threads)
+        .with_chunk_size_mb(args.chunk_size);
+    downloader
+        .download_named(&config.public_data, &args.name, &args.output, args.dry_run)
+        .await?;
+    info!("🎉 Public data download completed successfully!");
+    Ok(())
 }
 
 // ============================================================
@@ -346,12 +580,33 @@ async fn main() -> ExitCode {
 
 async fn run_download(args: &DownloadArgs, cli: &Cli) -> Result<()> {
     let filters = RegexFilters {
-        include_sample: args.filter_sample.iter().map(|s| Regex::new(s)).collect::<Result<Vec<_>, _>>().context("Invalid regex pattern for --filter-sample")?,
-        include_run: args.filter_run.iter().map(|s| Regex::new(s)).collect::<Result<Vec<_>, _>>().context("Invalid regex pattern for --filter-run")?,
-        exclude_sample: args.exclude_sample.iter().map(|s| Regex::new(s)).collect::<Result<Vec<_>, _>>().context("Invalid regex pattern for --exclude-sample")?,
-        exclude_run: args.exclude_run.iter().map(|s| Regex::new(s)).collect::<Result<Vec<_>, _>>().context("Invalid regex pattern for --exclude-run")?,
+        include_sample: args
+            .filter_sample
+            .iter()
+            .map(|s| Regex::new(s))
+            .collect::<Result<Vec<_>, _>>()
+            .context("Invalid regex pattern for --filter-sample")?,
+        include_run: args
+            .filter_run
+            .iter()
+            .map(|s| Regex::new(s))
+            .collect::<Result<Vec<_>, _>>()
+            .context("Invalid regex pattern for --filter-run")?,
+        exclude_sample: args
+            .exclude_sample
+            .iter()
+            .map(|s| Regex::new(s))
+            .collect::<Result<Vec<_>, _>>()
+            .context("Invalid regex pattern for --exclude-sample")?,
+        exclude_run: args
+            .exclude_run
+            .iter()
+            .map(|s| Regex::new(s))
+            .collect::<Result<Vec<_>, _>>()
+            .context("Invalid regex pattern for --exclude-run")?,
     };
-    let config = load_config(&cli.yaml).context("Failed to load YAML configuration")?;
+    let yaml_path = yaml_path(cli)?;
+    let config = load_config(&yaml_path).context("Failed to load YAML configuration")?;
 
     info!("📁 Output directory: {}", args.output.display());
 
@@ -377,11 +632,20 @@ async fn run_download(args: &DownloadArgs, cli: &Cli) -> Result<()> {
     let processed = process_records(filtered_records, args.pe_only, None)?;
     save_md5_files(&processed, &args.output, args.accession.as_deref())?;
 
+    if processed.is_empty() {
+        warn!("⚠️  Records were found, but none have downloadable FASTQ/SRA files. The data may not have been synced to SRA/ENA yet. Please try again later.");
+        return Ok(());
+    }
+
     if args.dry_run {
         info!("🏜️  Dry Run Mode: Listing files that would be downloaded:");
         for record in &processed {
             info!("   📦 [{}]", record.run_accession);
-            info!("      - File 1: {} ({})", record.fastq_ftp_1_name, HumanBytes(record.fastq_bytes_1));
+            info!(
+                "      - File 1: {} ({})",
+                record.fastq_ftp_1_name,
+                HumanBytes(record.fastq_bytes_1)
+            );
 
             if let (Some(name), Some(size)) = (&record.fastq_ftp_2_name, record.fastq_bytes_2) {
                 info!("      - File 2: {} ({})", name, HumanBytes(size));
@@ -426,8 +690,13 @@ async fn run_download(args: &DownloadArgs, cli: &Cli) -> Result<()> {
             info!("🤖 Auto Mode: Attempting AWS S3 first...");
             validate_config(&config, DownloadMethod::Aws)?;
             validate_config(&config, DownloadMethod::Prefetch)?;
-            if let Err(e) = download_with_aws(&processed, &config, args, progress_store.clone()).await {
-                warn!("⚠️  AWS S3 download encountered issues: {}. Switching to Prefetch...", e);
+            if let Err(e) =
+                download_with_aws(&processed, &config, args, progress_store.clone()).await
+            {
+                warn!(
+                    "⚠️  AWS S3 download encountered issues: {}. Switching to Prefetch...",
+                    e
+                );
                 download_with_prefetch(&processed, &config, args).await?;
             }
         }
@@ -504,18 +773,26 @@ async fn run_deps(args: &DepsArgs, cli: &Cli) -> Result<()> {
                 }
             });
 
-            let paths = install_sra_tools(version.as_deref(), url.as_deref(), Some(progress_cb)).await?;
+            let paths =
+                install_sra_tools(version.as_deref(), url.as_deref(), Some(progress_cb)).await?;
             pb.finish_with_message("sra-tools installed");
 
-            let yaml_path = yaml.clone().unwrap_or_else(|| cli.yaml.clone());
+            let yaml_path = match yaml {
+                Some(path) => path.clone(),
+                None => yaml_path(cli)?,
+            };
             write_software_paths_to_yaml(&yaml_path, &paths)?;
 
             let abs_yaml = std::fs::canonicalize(&yaml_path).unwrap_or_else(|_| yaml_path.clone());
-            info!("✅ sra-tools installed and configured in {}", abs_yaml.display());
+            info!(
+                "✅ sra-tools installed and configured in {}",
+                abs_yaml.display()
+            );
         }
         DepsSubcommand::Check => {
-            let config = if cli.yaml.exists() {
-                Some(load_config(&cli.yaml)?)
+            let yaml_path = yaml_path(cli)?;
+            let config = if yaml_path.exists() {
+                Some(load_config(&yaml_path)?)
             } else {
                 None
             };
@@ -571,7 +848,12 @@ fn print_banner() {
     println!("{}\n", logo);
 }
 
-fn setup_logging(output_dir: &Path, log_level: &str, format: &LogFormat, accession: Option<&str>) -> Result<()> {
+fn setup_logging(
+    output_dir: &Path,
+    log_level: &str,
+    format: &LogFormat,
+    accession: Option<&str>,
+) -> Result<()> {
     use tracing_subscriber::{layer::SubscriberExt, Layer};
     struct LocalTimer;
     impl fmt::time::FormatTime for LocalTimer {
@@ -597,7 +879,8 @@ fn setup_logging(output_dir: &Path, log_level: &str, format: &LogFormat, accessi
         .with_timer(fmt::time::LocalTime::rfc_3339())
         .with_filter(EnvFilter::new("debug"));
 
-    let mut stdout_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(log_level));
+    let mut stdout_filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(log_level));
     if let Ok(directive) = "download_detail=off".parse() {
         stdout_filter = stdout_filter.add_directive(directive);
     }
@@ -615,8 +898,11 @@ fn setup_logging(output_dir: &Path, log_level: &str, format: &LogFormat, accessi
                 .with_target(false)
                 .with_filter(stdout_filter);
 
-            let subscriber = tracing_subscriber::registry().with(file_layer).with(json_layer);
-            tracing::subscriber::set_global_default(subscriber).context("Failed to set subscriber")?;
+            let subscriber = tracing_subscriber::registry()
+                .with(file_layer)
+                .with(json_layer);
+            tracing::subscriber::set_global_default(subscriber)
+                .context("Failed to set subscriber")?;
         }
         LogFormat::Text => {
             let stdout_layer = fmt::layer()
@@ -628,8 +914,11 @@ fn setup_logging(output_dir: &Path, log_level: &str, format: &LogFormat, accessi
                 .compact()
                 .with_filter(stdout_filter);
 
-            let subscriber = tracing_subscriber::registry().with(file_layer).with(stdout_layer);
-            tracing::subscriber::set_global_default(subscriber).context("Failed to set subscriber")?;
+            let subscriber = tracing_subscriber::registry()
+                .with(file_layer)
+                .with(stdout_layer);
+            tracing::subscriber::set_global_default(subscriber)
+                .context("Failed to set subscriber")?;
         }
     }
 
@@ -641,13 +930,26 @@ fn apply_filters(records: Vec<EnaRecord>, filters: &RegexFilters) -> Result<Vec<
     let mut filtered = Vec::new();
     let mut filtered_count = 0;
     for record in records {
-        if filters.should_include(&record) { filtered.push(record); } else { filtered_count += 1; }
+        if filters.should_include(&record) {
+            filtered.push(record);
+        } else {
+            filtered_count += 1;
+        }
     }
-    if filtered_count > 0 { info!("🔍 Filtered out {} records based on regex patterns", filtered_count); }
+    if filtered_count > 0 {
+        info!(
+            "🔍 Filtered out {} records based on regex patterns",
+            filtered_count
+        );
+    }
     Ok(filtered)
 }
 
-fn save_md5_files(records: &[ProcessedRecord], output_dir: &Path, accession: Option<&str>) -> Result<()> {
+fn save_md5_files(
+    records: &[ProcessedRecord],
+    output_dir: &Path,
+    accession: Option<&str>,
+) -> Result<()> {
     let save_dir = if let Some(acc) = accession {
         let meta_dir = output_dir.join(format!("{}_metadata", acc));
         fs::create_dir_all(&meta_dir)?;
@@ -672,16 +974,24 @@ fn save_md5_files(records: &[ProcessedRecord], output_dir: &Path, accession: Opt
     let mut r2_file = File::create(&r2_path)?;
 
     for record in records {
-        writeln!(r1_file, "{}\t{}\t{}", record.fastq_md5_1, record.fastq_ftp_1_name, record.sample_title)?;
+        writeln!(
+            r1_file,
+            "{}\t{}\t{}",
+            record.fastq_md5_1, record.fastq_ftp_1_name, record.sample_title
+        )?;
         if let (Some(md5), Some(name)) = (&record.fastq_md5_2, &record.fastq_ftp_2_name) {
-             writeln!(r2_file, "{}\t{}\t{}", md5, name, record.sample_title)?;
+            writeln!(r2_file, "{}\t{}\t{}", md5, name, record.sample_title)?;
         }
     }
     info!("✅ MD5 files saved");
     Ok(())
 }
 
-fn save_metadata_tsv(records: &[EnaRecord], output_dir: &Path, accession: Option<&str>) -> Result<()> {
+fn save_metadata_tsv(
+    records: &[EnaRecord],
+    output_dir: &Path,
+    accession: Option<&str>,
+) -> Result<()> {
     let save_dir = if let Some(acc) = accession {
         let meta_dir = output_dir.join(format!("{}_metadata", acc));
         fs::create_dir_all(&meta_dir)?;
@@ -701,9 +1011,7 @@ fn save_metadata_tsv(records: &[EnaRecord], output_dir: &Path, accession: Option
         writeln!(file, "# Project Accession: {}", acc)?;
     }
 
-    let mut wtr = WriterBuilder::new()
-        .delimiter(b'\t')
-        .from_writer(file);
+    let mut wtr = WriterBuilder::new().delimiter(b'\t').from_writer(file);
 
     for record in records {
         wtr.serialize(record)?;
@@ -724,7 +1032,8 @@ pub fn create_script(output_path: &Path, fastq_id: &str, command: &str) -> Resul
     writeln!(file, "mkdir -p {}", output_path.display())?;
     writeln!(file, "cd {}", output_path.display())?;
     writeln!(file, "{}", command)?;
-    #[cfg(unix)] {
+    #[cfg(unix)]
+    {
         use std::os::unix::fs::PermissionsExt;
         let mut perms = fs::metadata(&script_path)?.permissions();
         perms.set_mode(0o755);
@@ -734,34 +1043,62 @@ pub fn create_script(output_path: &Path, fastq_id: &str, command: &str) -> Resul
 }
 
 // Prefetch Entry
-async fn download_with_prefetch(records: &[ProcessedRecord], config: &Config, args: &DownloadArgs) -> Result<()> {
-    ebidownload_core::prefetch::download_all(records, config, &args.output, args.multithreads, args.aws_threads, &args.prefetch_max_size, args.cleanup_sra).await
+async fn download_with_prefetch(
+    records: &[ProcessedRecord],
+    config: &Config,
+    args: &DownloadArgs,
+) -> Result<()> {
+    ebidownload_core::prefetch::download_all(
+        records,
+        config,
+        &args.output,
+        args.multithreads,
+        args.aws_threads,
+        &args.prefetch_max_size,
+        args.cleanup_sra,
+    )
+    .await
 }
 
 // AWS Entry (Keep original logic)
-async fn download_with_aws(records: &[ProcessedRecord], config: &Config, args: &DownloadArgs, progress_store: ProgressStore) -> Result<()> {
+async fn download_with_aws(
+    records: &[ProcessedRecord],
+    config: &Config,
+    args: &DownloadArgs,
+    progress_store: ProgressStore,
+) -> Result<()> {
     info!("☁️  Starting AWS S3 downloads...");
 
     let file_concurrency = args.multithreads;
     let chunk_concurrency = args.aws_threads;
-    let process_threads = if args.aws_threads > 4 { args.aws_threads } else { 4 };
+    let process_threads = if args.aws_threads > 4 {
+        args.aws_threads
+    } else {
+        4
+    };
     let chunk_size_mb = args.chunk_size;
 
-    info!("⚙️  Config: Parallel Files = {}, Threads/File = {}, Chunk Size = {}MB", file_concurrency, chunk_concurrency, chunk_size_mb);
+    info!(
+        "⚙️  Config: Parallel Files = {}, Threads/File = {}, Chunk Size = {}MB",
+        file_concurrency, chunk_concurrency, chunk_size_mb
+    );
 
     {
         let mut map = progress_store.write().await;
         for record in records {
             let sra_size = record.fastq_bytes_1 + record.fastq_bytes_2.unwrap_or(0);
             let extract_weight = (sra_size as f64) * 3.0;
-            map.insert(record.run_accession.clone(), RunProgress {
-                run_id: record.run_accession.clone(),
-                stage: RunStage::Pending,
-                overall_percent: 0.0,
-                download: StageProgress::new(sra_size as f64),
-                extraction: StageProgress::new(extract_weight),
-                compression: StageProgress::new(extract_weight),
-            });
+            map.insert(
+                record.run_accession.clone(),
+                RunProgress {
+                    run_id: record.run_accession.clone(),
+                    stage: RunStage::Pending,
+                    overall_percent: 0.0,
+                    download: StageProgress::new(sra_size as f64),
+                    extraction: StageProgress::new(extract_weight),
+                    compression: StageProgress::new(extract_weight),
+                },
+            );
         }
     }
 
@@ -807,7 +1144,8 @@ async fn download_with_aws(records: &[ProcessedRecord], config: &Config, args: &
                     max_workers,
                     Some(mp),
                     Some(progress_store.clone()),
-                ).await?;
+                )
+                .await?;
 
                 let success = downloader.start().await?;
                 if !success {
@@ -837,8 +1175,10 @@ async fn download_with_aws(records: &[ProcessedRecord], config: &Config, args: &
 
             let fq_1 = output_dir.join(format!("{}_1.fastq", run_id));
             let fq_single = output_dir.join(format!("{}.fastq", run_id));
-            let fq_exists = (fq_1.exists() && fq_1.metadata().map(|m| m.len() > 0).unwrap_or(false)) ||
-                            (fq_single.exists() && fq_single.metadata().map(|m| m.len() > 0).unwrap_or(false));
+            let fq_exists = (fq_1.exists()
+                && fq_1.metadata().map(|m| m.len() > 0).unwrap_or(false))
+                || (fq_single.exists()
+                    && fq_single.metadata().map(|m| m.len() > 0).unwrap_or(false));
 
             if fq_exists {
                 info!(target: "download_detail", "⏩ [{}] FASTQ files already exist, skipping conversion.", run_id);
@@ -848,8 +1188,10 @@ async fn download_with_aws(records: &[ProcessedRecord], config: &Config, args: &
                 let estimated_fastq_size = sra_size * 3;
                 let mut child = Command::new(&fasterq_dump)
                     .arg("--split-3")
-                    .arg("-e").arg(process_threads.to_string())
-                    .arg("-O").arg(".")
+                    .arg("-e")
+                    .arg(process_threads.to_string())
+                    .arg("-O")
+                    .arg(".")
                     .arg("-f")
                     .arg(&sra_filename)
                     .current_dir(&output_dir)
@@ -888,7 +1230,10 @@ async fn download_with_aws(records: &[ProcessedRecord], config: &Config, args: &
                 extract_monitor.abort();
 
                 if !status.success() {
-                    warn!("⚠️ [{}] fasterq-dump exited with status: {}", run_id, status);
+                    warn!(
+                        "⚠️ [{}] fasterq-dump exited with status: {}",
+                        run_id, status
+                    );
                 }
             }
 
@@ -902,8 +1247,10 @@ async fn download_with_aws(records: &[ProcessedRecord], config: &Config, args: &
                 }
             }
 
-            let fq_exists_after = (fq_1.exists() && fq_1.metadata().map(|m| m.len() > 0).unwrap_or(false)) ||
-               (fq_single.exists() && fq_single.metadata().map(|m| m.len() > 0).unwrap_or(false));
+            let fq_exists_after = (fq_1.exists()
+                && fq_1.metadata().map(|m| m.len() > 0).unwrap_or(false))
+                || (fq_single.exists()
+                    && fq_single.metadata().map(|m| m.len() > 0).unwrap_or(false));
 
             if fq_exists_after {
                 info!(target: "download_detail", "📦 [{}] Step 3: Compressing...", run_id);
@@ -948,7 +1295,12 @@ async fn download_with_aws(records: &[ProcessedRecord], config: &Config, args: &
                 let output_dir_compress = output_dir.clone();
                 let run_id_compress = run_id.clone();
                 tokio::task::spawn_blocking(move || {
-                    ebidownload_core::compress_fastq_files(&output_dir_compress, &run_id_compress, process_threads, Some(progress_cb))
+                    ebidownload_core::compress_fastq_files(
+                        &output_dir_compress,
+                        &run_id_compress,
+                        process_threads,
+                        Some(progress_cb),
+                    )
                 })
                 .await
                 .context("Compression task panicked")?
@@ -979,7 +1331,10 @@ async fn download_with_aws(records: &[ProcessedRecord], config: &Config, args: &
                 info!("✅ [{}] Done", run_id);
                 Ok(())
             } else {
-                error!("❌ [{}] Conversion failed and no FASTQ output found.", run_id);
+                error!(
+                    "❌ [{}] Conversion failed and no FASTQ output found.",
+                    run_id
+                );
                 let mut map = progress_store.write().await;
                 if let Some(rp) = map.get_mut(&run_id) {
                     rp.stage = RunStage::Failed;
@@ -992,7 +1347,9 @@ async fn download_with_aws(records: &[ProcessedRecord], config: &Config, args: &
     }
 
     for handle in handles {
-        if let Err(e) = handle.await { warn!("Task error: {}", e); }
+        if let Err(e) = handle.await {
+            warn!("Task error: {}", e);
+        }
     }
     BARS_ACTIVE.store(false, std::sync::atomic::Ordering::Relaxed);
 
@@ -1011,14 +1368,18 @@ async fn download_with_aws(records: &[ProcessedRecord], config: &Config, args: &
 }
 
 // FTP Entry
-async fn download_with_ftp(records: &[ProcessedRecord], config: &Config, args: &DownloadArgs) -> Result<()> {
+async fn download_with_ftp(
+    records: &[ProcessedRecord],
+    config: &Config,
+    args: &DownloadArgs,
+) -> Result<()> {
     // 🟢 Call ftp.rs, pass file size to enable percentage progress bar
     ebidownload_core::ftp::process_downloads(
         records,
         config,
         &args.output,
         ebidownload_core::ftp::Protocol::Ftp,
-        args.multithreads
-    ).await
+        args.multithreads,
+    )
+    .await
 }
-

@@ -6,12 +6,14 @@ pub mod ftp;
 pub mod prefetch;
 pub mod progress;
 pub mod progress_store;
+pub mod public_data;
 pub mod upload;
 
 use anyhow::{anyhow, Context, Result};
 use gzp::{deflate::Gzip, ZBuilder};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
@@ -21,6 +23,8 @@ use tracing::info;
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Config {
     pub software: SoftwarePaths,
+    #[serde(default)]
+    pub public_data: HashMap<String, public_data::PublicDatabase>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -242,22 +246,30 @@ pub struct RegexFilters {
 
 impl RegexFilters {
     pub fn new(options: &DownloadOptions) -> Result<Self> {
-        let include_sample = options.filter_sample.iter()
+        let include_sample = options
+            .filter_sample
+            .iter()
             .map(|s| Regex::new(s))
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| anyhow!("Invalid regex pattern for filter_sample: {}", e))?;
-        
-        let include_run = options.filter_run.iter()
+
+        let include_run = options
+            .filter_run
+            .iter()
             .map(|s| Regex::new(s))
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| anyhow!("Invalid regex pattern for filter_run: {}", e))?;
-            
-        let exclude_sample = options.exclude_sample.iter()
+
+        let exclude_sample = options
+            .exclude_sample
+            .iter()
             .map(|s| Regex::new(s))
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| anyhow!("Invalid regex pattern for exclude_sample: {}", e))?;
-            
-        let exclude_run = options.exclude_run.iter()
+
+        let exclude_run = options
+            .exclude_run
+            .iter()
             .map(|s| Regex::new(s))
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| anyhow!("Invalid regex pattern for exclude_run: {}", e))?;
@@ -271,10 +283,38 @@ impl RegexFilters {
     }
 
     pub fn should_include(&self, record: &EnaRecord) -> bool {
-        if !self.include_sample.is_empty() && !self.include_sample.iter().any(|r| r.is_match(&record.sample_title)) { return false; }
-        if !self.include_run.is_empty() && !self.include_run.iter().any(|r| r.is_match(&record.run_accession)) { return false; }
-        if !self.exclude_sample.is_empty() && self.exclude_sample.iter().any(|r| r.is_match(&record.sample_title)) { return false; }
-        if !self.exclude_run.is_empty() && self.exclude_run.iter().any(|r| r.is_match(&record.run_accession)) { return false; }
+        if !self.include_sample.is_empty()
+            && !self
+                .include_sample
+                .iter()
+                .any(|r| r.is_match(&record.sample_title))
+        {
+            return false;
+        }
+        if !self.include_run.is_empty()
+            && !self
+                .include_run
+                .iter()
+                .any(|r| r.is_match(&record.run_accession))
+        {
+            return false;
+        }
+        if !self.exclude_sample.is_empty()
+            && self
+                .exclude_sample
+                .iter()
+                .any(|r| r.is_match(&record.sample_title))
+        {
+            return false;
+        }
+        if !self.exclude_run.is_empty()
+            && self
+                .exclude_run
+                .iter()
+                .any(|r| r.is_match(&record.run_accession))
+        {
+            return false;
+        }
         true
     }
 }
@@ -297,7 +337,11 @@ pub fn process_records(
             .split(';')
             .filter(|s| !s.is_empty())
             .collect();
-        let md5s: Vec<&str> = record.fastq_md5.split(';').filter(|s| !s.is_empty()).collect();
+        let md5s: Vec<&str> = record
+            .fastq_md5
+            .split(';')
+            .filter(|s| !s.is_empty())
+            .collect();
         let sizes: Vec<u64> = record
             .fastq_bytes
             .split(';')
@@ -366,7 +410,11 @@ pub fn compress_fastq_files(
         }
 
         let output_path = output_dir.join(format!("{}.gz", name));
-        info!("📦 Compressing {} -> {}", input_path.display(), output_path.display());
+        info!(
+            "📦 Compressing {} -> {}",
+            input_path.display(),
+            output_path.display()
+        );
 
         let input_size = input_path.metadata()?.len();
         let input = File::open(&input_path)
@@ -429,10 +477,7 @@ impl<R: std::io::Read> std::io::Read for CountingReader<R> {
 }
 
 /// Generate md5.txt in md5sum-compatible format: "<md5>  <filename>\n"
-pub fn generate_md5sum_file(
-    output_dir: &Path,
-    gz_files: &[PathBuf],
-) -> Result<PathBuf> {
+pub fn generate_md5sum_file(output_dir: &Path, gz_files: &[PathBuf]) -> Result<PathBuf> {
     let md5_path = output_dir.join("md5.txt");
     let mut file = File::create(&md5_path)?;
 

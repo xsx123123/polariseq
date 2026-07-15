@@ -173,7 +173,9 @@ pub fn check_sra_tools(config: Option<&Config>) -> DepStatus {
     }
 
     DepStatus::Missing {
-        reason: "sra-tools (prefetch / fasterq-dump) not found in config, managed dependencies, or PATH".to_string(),
+        reason:
+            "sra-tools (prefetch / fasterq-dump) not found in config, managed dependencies, or PATH"
+                .to_string(),
     }
 }
 
@@ -262,8 +264,12 @@ pub async fn install_sra_tools(
     }
 
     let install_dir = sra_tools_install_dir(version);
-    std::fs::create_dir_all(&install_dir)
-        .with_context(|| format!("Failed to create install directory {}", install_dir.display()))?;
+    std::fs::create_dir_all(&install_dir).with_context(|| {
+        format!(
+            "Failed to create install directory {}",
+            install_dir.display()
+        )
+    })?;
 
     // Download to a temporary file
     let temp_dir = tempfile::tempdir()?;
@@ -334,8 +340,8 @@ async fn download_file_with_progress(
         });
     }
 
-    let file = File::create(dest)
-        .with_context(|| format!("Failed to create file {}", dest.display()))?;
+    let file =
+        File::create(dest).with_context(|| format!("Failed to create file {}", dest.display()))?;
     let mut writer = BufWriter::new(file);
     let mut stream = response.bytes_stream();
     let mut downloaded: u64 = 0;
@@ -349,10 +355,7 @@ async fn download_file_with_progress(
 
         if let Some(cb) = &progress_cb {
             if downloaded.saturating_sub(last_reported) >= REPORT_INTERVAL {
-                cb(DepProgressEvent::DownloadProgress {
-                    downloaded,
-                    total,
-                });
+                cb(DepProgressEvent::DownloadProgress { downloaded, total });
                 last_reported = downloaded;
             }
         }
@@ -360,10 +363,7 @@ async fn download_file_with_progress(
 
     // Final progress report
     if let Some(cb) = &progress_cb {
-        cb(DepProgressEvent::DownloadProgress {
-            downloaded,
-            total,
-        });
+        cb(DepProgressEvent::DownloadProgress { downloaded, total });
     }
 
     writer.flush()?;
@@ -405,12 +405,7 @@ async fn fetch_expected_md5(checksum_url: &str, file_name: &str) -> Result<Strin
         .timeout(std::time::Duration::from_secs(60))
         .build()?;
 
-    let text = client
-        .get(checksum_url)
-        .send()
-        .await?
-        .text()
-        .await?;
+    let text = client.get(checksum_url).send().await?.text().await?;
 
     for line in text.lines() {
         let parts: Vec<&str> = line.split_whitespace().collect();
@@ -505,6 +500,7 @@ pub fn write_software_paths_to_yaml(yaml_path: &Path, paths: &SoftwarePaths) -> 
                 prefetch: paths.prefetch.clone(),
                 fasterq_dump: paths.fasterq_dump.clone(),
             },
+            public_data: Default::default(),
         })
     } else {
         Config {
@@ -512,6 +508,7 @@ pub fn write_software_paths_to_yaml(yaml_path: &Path, paths: &SoftwarePaths) -> 
                 prefetch: paths.prefetch.clone(),
                 fasterq_dump: paths.fasterq_dump.clone(),
             },
+            public_data: Default::default(),
         }
     };
 
