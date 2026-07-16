@@ -1,7 +1,7 @@
 # EBIDownload Setting yaml
 software:
-  prefetch : /Users/zhangjian/software/sratoolkit.3.4.1-mac-x86_64/bin/prefetch
-  fasterq_dump : /Users/zhangjian/software/sratoolkit.3.4.1-mac-x86_64/bin/fasterq-dump
+  prefetch : /home/zj/.local/share/mamba/envs/EBIDownload/bin/prefetch
+  fasterq_dump : /home/zj/.local/share/mamba/envs/EBIDownload/bin/fasterq-dump
 # Public data
 public_data:
   ncbi_nt:
