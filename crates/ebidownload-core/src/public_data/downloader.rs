@@ -7,6 +7,8 @@ use anyhow::{anyhow, Context, Result};
 use aws_sdk_s3::Client;
 use indicatif::{HumanBytes, MultiProgress, ProgressBar};
 use std::collections::HashMap;
+use std::fs::File;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -36,6 +38,28 @@ struct Volume {
     name: String,
     local_prefix: PathBuf,
     objects: Vec<PublicObject>,
+}
+
+impl Volume {
+    fn failure(&self, bucket: &str, error: String) -> VolumeFailure {
+        VolumeFailure {
+            volume_name: self.name.clone(),
+            s3_uris: self
+                .objects
+                .iter()
+                .map(|object| format!("s3://{}/{}", bucket, object.key))
+                .collect(),
+            error,
+        }
+    }
+}
+
+/// Information about a volume that failed download or validation.
+#[derive(Debug)]
+struct VolumeFailure {
+    volume_name: String,
+    s3_uris: Vec<String>,
+    error: String,
 }
 
 /// Group objects by their filename stem so that files belonging to the same
@@ -228,6 +252,7 @@ impl PublicDataDownloader {
 
                 self.download_volumes(
                     &source.bucket,
+                    name,
                     &objects,
                     output_dir,
                     validate_cfg,
@@ -324,6 +349,7 @@ impl PublicDataDownloader {
     async fn download_volumes(
         &self,
         bucket: &str,
+        database_name: &str,
         objects: &[PublicObject],
         output_dir: &Path,
         validate_cfg: Option<&super::config::ValidateConfig>,
@@ -361,13 +387,23 @@ impl PublicDataDownloader {
         }
 
         let mut first_error = None;
+        let mut failures: Vec<VolumeFailure> = Vec::new();
         for handle in handles {
             match handle.await.context("Public data volume task panicked")? {
                 Ok(()) => {}
-                Err(error) if first_error.is_none() => first_error = Some(error),
-                Err(_) => {}
+                Err(failure) => {
+                    if first_error.is_none() {
+                        first_error = Some(anyhow!("{}", failure.error));
+                    }
+                    failures.push(failure);
+                }
             }
         }
+
+        if !failures.is_empty() {
+            self.write_failed_volumes_manifest(output_dir, database_name, &failures)?;
+        }
+
         if let Some(error) = first_error {
             return Err(error);
         }
@@ -381,18 +417,23 @@ impl PublicDataDownloader {
         validate_cfg: Option<&super::config::ValidateConfig>,
         tool_path: Option<&Path>,
         output_dir: &Path,
-    ) -> Result<()> {
+    ) -> std::result::Result<(), VolumeFailure> {
         let mut attempts: u32 = 0;
         let max_attempts = validate_cfg.map(|c| c.max_retries + 1).unwrap_or(1);
 
         loop {
             for object in &volume.objects {
-                self.download_object(bucket, object, output_dir).await?;
+                self.download_object(bucket, object, output_dir)
+                    .await
+                    .map_err(|e| volume.failure(bucket, e.to_string()))?;
             }
 
             if let Some(cfg) = validate_cfg {
                 let tool = tool_path.ok_or_else(|| {
-                    anyhow!("Validation tool path missing for volume {}", volume.name)
+                    volume.failure(
+                        bucket,
+                        format!("Validation tool path missing for volume {}", volume.name),
+                    )
                 })?;
 
                 let spinner = self.progress.add(ProgressBar::new_spinner());
@@ -404,34 +445,50 @@ impl PublicDataDownloader {
                     &cfg.dbtype,
                     tool,
                 )
-                .await?
+                .await
                 {
-                    true => {
+                    Ok(true) => {
                         spinner.finish_with_message(format!(
                             "{GREEN}  ✅  {:<8} validated{RESET}",
                             volume.name
                         ));
                         break;
                     }
-                    false => {
+                    Ok(false) => {
                         spinner.abandon_with_message(format!(
                             "{RED_BOLD}  ❌  {:<8} corrupted ❌{RESET}",
                             volume.name
                         ));
                         attempts += 1;
                         if attempts >= max_attempts {
-                            return Err(anyhow!(
-                                "Volume {} failed validation after {} retries",
-                                volume.name,
-                                cfg.max_retries
+                            return Err(volume.failure(
+                                bucket,
+                                format!(
+                                    "Volume {} failed validation after {} retries",
+                                    volume.name, cfg.max_retries
+                                ),
                             ));
                         }
-                        self.progress.println(format!(
+                        let _ = self.progress.println(format!(
                             "🔄 {} validation failed ({}/{}), re-downloading in {}s",
                             volume.name, attempts, cfg.max_retries, cfg.retry_delay_seconds
-                        ))?;
+                        ));
                         sleep(Duration::from_secs(cfg.retry_delay_seconds)).await;
-                        super::validator::delete_volume_files(&volume.local_prefix).await?;
+                        if let Err(e) = super::validator::delete_volume_files(&volume.local_prefix).await {
+                            return Err(volume.failure(
+                                bucket,
+                                format!(
+                                    "Volume {} failed to clean up corrupted files: {}",
+                                    volume.name, e
+                                ),
+                            ));
+                        }
+                    }
+                    Err(e) => {
+                        return Err(volume.failure(
+                            bucket,
+                            format!("Volume {} validation command failed: {}", volume.name, e),
+                        ));
                     }
                 }
             } else {
@@ -528,6 +585,36 @@ impl PublicDataDownloader {
             .collect::<Result<Vec<_>>>()?;
         let manifest_path = output_dir.join(format!("{database_name}.md5"));
         generate_md5sum_file_at(&manifest_path, &files)?;
+        Ok(())
+    }
+
+    fn write_failed_volumes_manifest(
+        &self,
+        output_dir: &Path,
+        database_name: &str,
+        failures: &[VolumeFailure],
+    ) -> Result<()> {
+        let manifest_path = output_dir.join(format!("{database_name}.failed_volumes.txt"));
+        let mut file = File::create(&manifest_path)
+            .with_context(|| format!("Failed to create {}", manifest_path.display()))?;
+        let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+        writeln!(file, "# Failed volumes for {}", database_name)?;
+        writeln!(file, "# Generated at {}", now)?;
+        writeln!(file, "# Total: {}", failures.len())?;
+        writeln!(file)?;
+        for failure in failures {
+            writeln!(file, "{}", failure.volume_name)?;
+            writeln!(file, "# error: {}", failure.error)?;
+            for uri in &failure.s3_uris {
+                writeln!(file, "  {}", uri)?;
+            }
+            writeln!(file)?;
+        }
+        warn!(
+            "📝 Failed volumes manifest written: {} ({} volumes)",
+            manifest_path.display(),
+            failures.len()
+        );
         Ok(())
     }
 }
