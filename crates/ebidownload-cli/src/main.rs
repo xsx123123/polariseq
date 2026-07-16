@@ -825,14 +825,12 @@ async fn run_validate(args: &ValidateArgs, cli: &Cli) -> Result<()> {
         return Err(anyhow!("Database directory {} does not exist", args.dir.display()));
     }
 
-    BARS_ACTIVE.store(true, std::sync::atomic::Ordering::Relaxed);
     let result = ebidownload_core::public_data::validator::validate_all_volumes(
         &args.dir,
         &args.dbtype,
         &tool_path,
     )
     .await;
-    BARS_ACTIVE.store(false, std::sync::atomic::Ordering::Relaxed);
 
     let (passed, failed) = result?;
     if failed > 0 {

@@ -20,10 +20,6 @@ const DEFAULT_FILE_WORKERS: usize = 8;
 const DEFAULT_INNER_WORKERS: usize = 4;
 const DEFAULT_CHUNK_SIZE_MB: u64 = 64;
 
-const GREEN: &str = "\x1b[32m";
-const RED_BOLD: &str = "\x1b[1;31m";
-const RESET: &str = "\x1b[0m";
-
 #[derive(Debug, Clone)]
 struct PublicObject {
     key: String,
@@ -445,11 +441,11 @@ impl PublicDataDownloader {
                 .await
                 {
                     Ok(true) => {
-                        info!("{GREEN}✅ {:<8} validated{RESET}", volume.name);
+                        info!("✅ {:<8} validated", volume.name);
                         break;
                     }
                     Ok(false) => {
-                        warn!("{RED_BOLD}❌ {:<8} corrupted{RESET}", volume.name);
+                        warn!("❌ {:<8} corrupted", volume.name);
                         attempts += 1;
                         if attempts >= max_attempts {
                             return Err(volume.failure(

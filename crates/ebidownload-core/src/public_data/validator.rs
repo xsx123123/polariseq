@@ -17,10 +17,6 @@ const BLAST_VOLUME_EXTENSIONS: &[&str] = &[
     "phr", "psq", "pin", "pog", "pni", "pnd", "psi", "psd", "aln", "freq",
 ];
 
-const GREEN: &str = "\x1b[32m";
-const RED_BOLD: &str = "\x1b[1;31m";
-const RESET: &str = "\x1b[0m";
-
 /// Run `blastdbcmd -db <volume_prefix> -dbtype <dbtype> -info`.
 ///
 /// Returns `Ok(true)` when the command exits successfully, `Ok(false)` when it
@@ -108,15 +104,15 @@ pub async fn validate_all_volumes(
 
         match validate_blast_volume(&prefix, dbtype, tool_path).await {
             Ok(true) => {
-                info!("{GREEN}✅ {:<8} validated{RESET}", name);
+                info!("✅ {:<8} validated", name);
                 passed += 1;
             }
             Ok(false) => {
-                warn!("{RED_BOLD}❌ {:<8} corrupted{RESET}", name);
+                warn!("❌ {:<8} corrupted", name);
                 failed += 1;
             }
             Err(e) => {
-                warn!("{RED_BOLD}❌ {:<8} validation error: {}{RESET}", name, e);
+                warn!("❌ {:<8} validation error: {}", name, e);
                 failed += 1;
             }
         }
@@ -150,11 +146,11 @@ where
 
         match validate_blast_volume(volume_prefix, dbtype, tool_path).await? {
             true => {
-                info!("{GREEN}✅ {:<8} validated{RESET}", volume_name);
+                info!("✅ {:<8} validated", volume_name);
                 return Ok(());
             }
             false => {
-                warn!("{RED_BOLD}❌ {:<8} corrupted{RESET}", volume_name);
+                warn!("❌ {:<8} corrupted", volume_name);
                 attempts += 1;
                 if attempts > max_retries {
                     return Err(anyhow!(
