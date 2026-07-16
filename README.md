@@ -419,6 +419,27 @@ A circular **theme toggle button** in the top-right corner of the header switche
 
 Folder sources use `exclude` first and then `include` as an override. For example, `exclude: "*"` together with `include: "nt.*"` downloads only `nt.*` objects below the configured S3 prefix. Plain 32-hex S3 ETags are verified as MD5 values; other object types retain size and completed-range checks. Each completed database also writes `<name>.md5`, an `md5sum`-compatible manifest containing every downloaded file. Each object uses its own `.meta.json` file for resumable transfer; it is removed when the download completes.
 
+##### Verifying downloaded BLAST databases
+
+For `ncbi_nt` and `ncbi_nr`, EBIDownload already validates every volume with `blastdbcmd -info` during the download and retries corrupted volumes automatically. After the download finishes, you can also run a manual integrity check with NCBI's own tools:
+
+```bash
+# Detailed check (requires blastdbcheck from NCBI BLAST+)
+blastdbcheck -db <output_dir>/nt -dbtype nucl -verbosity 3
+
+# Quick info check (requires blastdbcmd from NCBI BLAST+)
+blastdbcmd -db <output_dir>/nt -dbtype nucl -info
+```
+
+For a protein database such as `nr`, use `-dbtype prot`:
+
+```bash
+blastdbcheck -db <output_dir>/nr -dbtype prot -verbosity 3
+blastdbcmd -db <output_dir>/nr -dbtype prot -info
+```
+
+Replace `<output_dir>/nt` or `<output_dir>/nr` with the actual path to the database prefix (the part before `.phr`/`.psq`/`.pin`). If these commands exit successfully, the database is ready to use.
+
 #### c. Download Examples
 
 **1. AWS S3 High-Speed Mode (Most Recommended)**

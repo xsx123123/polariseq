@@ -433,6 +433,27 @@ EBIDownload download -A PRJNA1251654 -o ./data -d aws
 
 `public-data` 从 `EBIDownload.yaml` 的 `public_data` 配置中读取公开 S3 数据库。`folder` 类型会列举并按 `exclude` / `include` 通配符过滤前缀下的对象；`file` 类型下载单个对象。下载使用匿名 S3 列举和 HTTP Range 分片续传，不执行 EBI/NCBI API 健康检查。对于标准 32 位十六进制 S3 ETag，程序会作为 MD5 进行远端一致性校验；其他对象仍执行分片完成和对象大小校验。每个数据库下载完成后会生成 `<数据库标识>.md5`，其中包含该次下载全部文件的 md5sum 兼容校验值；每个目标文件都会保留独立的 `.meta.json` 进度文件，重新运行相同命令即可继续未完成下载。
 
+下载 `ncbi_nt` / `ncbi_nr` 等多卷 BLAST 数据库时，程序会在每个分卷下载完成后自动调用 `blastdbcmd -info` 校验；校验失败的分卷会被删除并自动重试。如果最终仍有分卷无法通过校验，程序会在输出目录生成 `<数据库标识>.failed_volumes.txt`，列出损坏分卷的名称和对应 S3 URI，同时不会生成该数据库的 `.md5` 文件。
+
+下载完成后，你也可以使用 NCBI 自带工具手动再检查一遍数据库完整性：
+
+```bash
+# 详细检查（需要 NCBI BLAST+ 的 blastdbcheck）
+blastdbcheck -db <输出目录>/nt -dbtype nucl -verbosity 3
+
+# 快速信息检查（需要 NCBI BLAST+ 的 blastdbcmd）
+blastdbcmd -db <输出目录>/nt -dbtype nucl -info
+```
+
+对于蛋白数据库（如 `nr`），将 `-dbtype` 改为 `prot`：
+
+```bash
+blastdbcheck -db <输出目录>/nr -dbtype prot -verbosity 3
+blastdbcmd -db <输出目录>/nr -dbtype prot -info
+```
+
+将 `<输出目录>/nt` 或 `<输出目录>/nr` 替换为实际的数据库前缀路径（即 `.phr`/`.psq`/`.pin` 前面的部分）。命令成功退出即表示数据库完整可用。
+
 ```yaml
 public_data:
   ncbi_nt:
