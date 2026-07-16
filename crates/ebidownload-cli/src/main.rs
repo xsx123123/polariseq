@@ -830,7 +830,6 @@ async fn run_validate(args: &ValidateArgs, cli: &Cli) -> Result<()> {
         &args.dir,
         &args.dbtype,
         &tool_path,
-        &GLOBAL_MP,
     )
     .await;
     BARS_ACTIVE.store(false, std::sync::atomic::Ordering::Relaxed);

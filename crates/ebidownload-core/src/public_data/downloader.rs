@@ -5,7 +5,7 @@ use crate::observer::{CompletedInfo, DownloadObserver};
 use crate::SoftwarePaths;
 use anyhow::{anyhow, Context, Result};
 use aws_sdk_s3::Client;
-use indicatif::{HumanBytes, MultiProgress, ProgressBar};
+use indicatif::{HumanBytes, MultiProgress};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::Write;
@@ -259,6 +259,7 @@ impl PublicDataDownloader {
                     tool_path.map(|p| p.as_path()),
                 )
                 .await?;
+                info!("📝 Generating MD5 manifest for '{}'", name);
                 self.generate_md5_manifest(output_dir, name, &objects)
             }
         }
@@ -436,10 +437,6 @@ impl PublicDataDownloader {
                     )
                 })?;
 
-                let spinner = self.progress.add(ProgressBar::new_spinner());
-                spinner.set_message(format!("validating {}...", volume.name));
-                spinner.enable_steady_tick(Duration::from_millis(100));
-
                 match super::validator::validate_blast_volume(
                     &volume.local_prefix,
                     &cfg.dbtype,
@@ -448,19 +445,11 @@ impl PublicDataDownloader {
                 .await
                 {
                     Ok(true) => {
-                        spinner.finish_and_clear();
-                        let _ = self.progress.println(format!(
-                            "{GREEN}✅ {:<8} validated{RESET}",
-                            volume.name
-                        ));
+                        info!("{GREEN}✅ {:<8} validated{RESET}", volume.name);
                         break;
                     }
                     Ok(false) => {
-                        spinner.finish_and_clear();
-                        let _ = self.progress.println(format!(
-                            "{RED_BOLD}❌ {:<8} corrupted{RESET}",
-                            volume.name
-                        ));
+                        warn!("{RED_BOLD}❌ {:<8} corrupted{RESET}", volume.name);
                         attempts += 1;
                         if attempts >= max_attempts {
                             return Err(volume.failure(
@@ -471,10 +460,10 @@ impl PublicDataDownloader {
                                 ),
                             ));
                         }
-                        let _ = self.progress.println(format!(
+                        info!(
                             "🔄 {} validation failed ({}/{}), re-downloading in {}s",
                             volume.name, attempts, cfg.max_retries, cfg.retry_delay_seconds
-                        ));
+                        );
                         sleep(Duration::from_secs(cfg.retry_delay_seconds)).await;
                         if let Err(e) = super::validator::delete_volume_files(&volume.local_prefix).await {
                             return Err(volume.failure(
@@ -487,7 +476,6 @@ impl PublicDataDownloader {
                         }
                     }
                     Err(e) => {
-                        spinner.finish_and_clear();
                         return Err(volume.failure(
                             bucket,
                             format!("Volume {} validation command failed: {}", volume.name, e),
@@ -606,10 +594,10 @@ impl PublicDataDownloader {
         writeln!(file, "# Total: {}", failures.len())?;
         writeln!(file)?;
         for failure in failures {
-            writeln!(file, "{}", failure.volume_name)?;
+            writeln!(file, "[volume: {}]", failure.volume_name)?;
             writeln!(file, "# error: {}", failure.error)?;
             for uri in &failure.s3_uris {
-                writeln!(file, "  {}", uri)?;
+                writeln!(file, "{}", uri)?;
             }
             writeln!(file)?;
         }

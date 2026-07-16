@@ -8,9 +8,9 @@
 use std::path::Path;
 
 use anyhow::{anyhow, Context, Result};
-use indicatif::{MultiProgress, ProgressBar};
 use tokio::process::Command;
 use tokio::time::{sleep, Duration};
+use tracing::{info, warn};
 
 /// File extensions that may belong to a single BLAST database volume.
 const BLAST_VOLUME_EXTENSIONS: &[&str] = &[
@@ -81,7 +81,6 @@ pub async fn validate_all_volumes(
     db_dir: &Path,
     dbtype: &str,
     tool_path: &Path,
-    progress: &MultiProgress,
 ) -> Result<(usize, usize)> {
     let mut entries = tokio::fs::read_dir(db_dir)
         .await
@@ -107,33 +106,17 @@ pub async fn validate_all_volumes(
             .unwrap_or("unknown")
             .to_string();
 
-        let spinner = progress.add(ProgressBar::new_spinner());
-        spinner.set_message(format!("validating {}...", name));
-        spinner.enable_steady_tick(Duration::from_millis(100));
-
         match validate_blast_volume(&prefix, dbtype, tool_path).await {
             Ok(true) => {
-                spinner.finish_and_clear();
-                progress.println(format!(
-                    "{GREEN}✅ {:<8} validated{RESET}",
-                    name
-                ))?;
+                info!("{GREEN}✅ {:<8} validated{RESET}", name);
                 passed += 1;
             }
             Ok(false) => {
-                spinner.finish_and_clear();
-                progress.println(format!(
-                    "{RED_BOLD}❌ {:<8} corrupted{RESET}",
-                    name
-                ))?;
+                warn!("{RED_BOLD}❌ {:<8} corrupted{RESET}", name);
                 failed += 1;
             }
             Err(e) => {
-                spinner.finish_and_clear();
-                progress.println(format!(
-                    "{RED_BOLD}❌ {:<8} validation error: {}{RESET}",
-                    name, e
-                ))?;
+                warn!("{RED_BOLD}❌ {:<8} validation error: {}{RESET}", name, e);
                 failed += 1;
             }
         }
@@ -154,7 +137,6 @@ pub async fn validate_volume_with_retry<F, Fut>(
     tool_path: &Path,
     max_retries: u32,
     retry_delay_seconds: u64,
-    progress: &MultiProgress,
     mut download_fn: F,
 ) -> Result<()>
 where
@@ -166,25 +148,13 @@ where
     loop {
         download_fn().await?;
 
-        let spinner = progress.add(ProgressBar::new_spinner());
-        spinner.set_message(format!("validating {}...", volume_name));
-        spinner.enable_steady_tick(Duration::from_millis(100));
-
         match validate_blast_volume(volume_prefix, dbtype, tool_path).await? {
             true => {
-                spinner.finish_and_clear();
-                progress.println(format!(
-                    "{GREEN}✅ {:<8} validated{RESET}",
-                    volume_name
-                ))?;
+                info!("{GREEN}✅ {:<8} validated{RESET}", volume_name);
                 return Ok(());
             }
             false => {
-                spinner.finish_and_clear();
-                progress.println(format!(
-                    "{RED_BOLD}❌ {:<8} corrupted{RESET}",
-                    volume_name
-                ))?;
+                warn!("{RED_BOLD}❌ {:<8} corrupted{RESET}", volume_name);
                 attempts += 1;
                 if attempts > max_retries {
                     return Err(anyhow!(
@@ -192,10 +162,10 @@ where
                         volume_name, max_retries
                     ));
                 }
-                progress.println(format!(
+                info!(
                     "🔄 {} validation failed ({}/{}), re-downloading in {}s",
                     volume_name, attempts, max_retries, retry_delay_seconds
-                ))?;
+                );
                 sleep(Duration::from_secs(retry_delay_seconds)).await;
                 delete_volume_files(volume_prefix).await?;
             }

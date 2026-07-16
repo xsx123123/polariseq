@@ -421,7 +421,17 @@ Folder sources use `exclude` first and then `include` as an override. For exampl
 
 ##### Verifying downloaded BLAST databases
 
-For `ncbi_nt` and `ncbi_nr`, EBIDownload already validates every volume with `blastdbcmd -info` during the download and retries corrupted volumes automatically. After the download finishes, you can also run a manual integrity check with NCBI's own tools:
+For `ncbi_nt` and `ncbi_nr`, EBIDownload already validates every volume with `blastdbcmd -info` during the download and retries corrupted volumes automatically. After the download finishes, you can also run a manual integrity check with NCBI's own tools or with the built-in `validate` subcommand.
+
+```bash
+# Validate all volumes in a downloaded database directory
+./target/release/EBIDownload validate -d ./dbs/nr -t prot
+
+# Use a specific blastdbcmd binary
+./target/release/EBIDownload validate -d ./dbs/nt -t nucl --tool /usr/bin/blastdbcmd
+```
+
+For manual checks with NCBI BLAST+:
 
 ```bash
 # Detailed check (requires blastdbcheck from NCBI BLAST+)
