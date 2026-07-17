@@ -16,7 +16,7 @@ By default, EBIDownload utilizes **AWS S3 global acceleration** to achieve ultra
 - **Public Data Download**: New `public-data` subcommand to download public reference databases from configured S3 sources.
 - **Colored Terminal Logging**: Logs now use a colorized format (timestamp purple, level auto-colored, module cyan) while log files remain plain text.
 - **Cleaner Progress Messages**: Progress messages are now consistently formatted through `tracing`.
-- **md5 subcommand**: Generate and verify multi-threaded MD5 checksums for downloaded files from the CLI.
+- **md5 subcommand**: Generate and verify multi-threaded MD5 checksums for downloaded files from the CLI, with a live per-file progress bar for each file being hashed.
 
 ## What's New in v1.4.0
 
@@ -522,6 +522,29 @@ The following example demonstrates how to download data for project `PRJNA125165
 # Example command:
 ./target/release/EBIDownload download -A PRJNA1251654 -o ./ --multithreads 6 --yaml ./EBIDownload.yaml -d prefetch
 ```
+
+#### d. MD5 Checksums
+
+The `md5` subcommand generates and verifies md5sum-compatible manifests for any local file or directory. Both operations hash multiple files in parallel and show a **live per-file progress bar** for each file being hashed (bars are skipped automatically when the output is not a TTY).
+
+```bash
+# Hash every file under a directory into an md5sum-compatible manifest
+./target/release/EBIDownload md5 generate -i /path/to/files -o md5.txt
+
+# Verify files against an existing manifest
+./target/release/EBIDownload md5 verify -i md5.txt -d /path/to/files
+```
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `-i`, `--input` | `generate`: file or directory to hash; `verify`: manifest to check against | — |
+| `-o`, `--output` | `generate` only: output manifest path | `md5.txt` |
+| `-d`, `--dir` | `verify` only: directory containing the listed files | `.` |
+| `-t`, `--threads` | Number of files hashed in parallel | `4` |
+
+Manifest lines use the standard `<md5>  <filename>` format, so they can also be checked with `md5sum -c md5.txt`. `md5 verify` logs a per-file ✅/❌ result, prints a pass/fail summary, and exits non-zero if any file is missing or mismatched.
+
+The subcommand writes its own log as `EBIDownload_md5_<timestamp>.log` next to the data. Both `generate` and `verify` automatically skip these `EBIDownload_md5_*.log` files, and `generate` never includes the output manifest itself, so re-running the command in the same directory stays idempotent.
 
 ---
 

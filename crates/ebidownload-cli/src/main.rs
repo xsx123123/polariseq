@@ -732,7 +732,10 @@ async fn main() -> ExitCode {
         &cli.log_format,
         match &cli.command {
             Commands::Download(args) => args.accession.as_deref(),
-            Commands::PublicData(_) | Commands::Validate(_) | Commands::Md5(_) | Commands::Upload(_) | Commands::Deps(_) => None,
+            // md5 logs land next to the hashed data; the `md5` tag makes their
+            // names match md5::MD5_LOG_PREFIX so hashing can skip them.
+            Commands::Md5(_) => Some("md5"),
+            Commands::PublicData(_) | Commands::Validate(_) | Commands::Upload(_) | Commands::Deps(_) => None,
         },
     ) {
         eprintln!("❌ Failed to setup logging: {}", e);
@@ -867,6 +870,20 @@ async fn run_validate(args: &ValidateArgs, cli: &Cli) -> Result<()> {
 }
 
 async fn run_md5(args: &Md5Args) -> Result<()> {
+    // Per-file hashing bars share the global MultiProgress. On a non-TTY the
+    // bars would be hidden anyway, so skip them and keep logs on stderr.
+    let mp = if GLOBAL_MP.is_hidden() {
+        None
+    } else {
+        BARS_ACTIVE.store(true, std::sync::atomic::Ordering::Relaxed);
+        Some(Arc::new(GLOBAL_MP.clone()))
+    };
+    let result = run_md5_command(args, mp).await;
+    BARS_ACTIVE.store(false, std::sync::atomic::Ordering::Relaxed);
+    result
+}
+
+async fn run_md5_command(args: &Md5Args, mp: Option<Arc<MultiProgress>>) -> Result<()> {
     match &args.command {
         Md5Subcommand::Generate(generate_args) => {
             if !generate_args.input.exists() {
@@ -884,6 +901,7 @@ async fn run_md5(args: &Md5Args) -> Result<()> {
                 &generate_args.input,
                 &generate_args.output,
                 generate_args.threads,
+                mp,
             )
             .await?;
             info!("🎉 MD5 manifest generated successfully");
@@ -906,6 +924,7 @@ async fn run_md5(args: &Md5Args) -> Result<()> {
                 &verify_args.input,
                 &verify_args.dir,
                 verify_args.threads,
+                mp,
             )
             .await?;
             print_summary_line("Verification finished", passed, failed, "failed");
@@ -1216,12 +1235,14 @@ fn setup_logging(
     output_dir: &Path,
     log_level: &str,
     format: &LogFormat,
-    accession: Option<&str>,
+    tag: Option<&str>,
 ) -> Result<()> {
     use tracing_subscriber::{layer::SubscriberExt, Layer};
     let timestamp = Local::now().format("%Y-%m-%d_%H-%M-%S");
-    let log_name = if let Some(acc) = accession {
-        format!("{}_{}_{}.log", SCRIPT_NAME, acc, timestamp)
+    // `tag` marks the log producer: the accession for downloads, the
+    // subcommand name for md5 (see md5::MD5_LOG_PREFIX in core).
+    let log_name = if let Some(tag) = tag {
+        format!("{}_{}_{}.log", SCRIPT_NAME, tag, timestamp)
     } else {
         format!("{}_{}.log", SCRIPT_NAME, timestamp)
     };
