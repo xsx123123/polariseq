@@ -1487,7 +1487,7 @@ async fn download_with_aws(
             }
 
             let metadata = polariseq_core::aws_s3::SraUtils::get_metadata(&run_id, None).await?;
-            let sra_filename = format!("{}.sra", run_id);
+            let sra_filename = run_id.clone();
             let sra_size = metadata.as_ref().map(|m| m.size).unwrap_or(0);
             info!(target: "download_detail", "[{}] Step 1: Downloading via AWS S3...", run_id);
 

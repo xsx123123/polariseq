@@ -515,7 +515,7 @@ async fn download_aws(
             )?;
 
             // fasterq-dump
-            let sra_filename = format!("{}.sra", run_id);
+            let sra_filename = run_id.clone();
             let fq_1 = output_dir.join(format!("{}_1.fastq", run_id));
             let fq_single = output_dir.join(format!("{}.fastq", run_id));
 
