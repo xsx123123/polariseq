@@ -738,6 +738,29 @@ async fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
+    // Pre-validate YAML config for commands that require it — fail fast
+    // before spending time on network connectivity checks.
+    if matches!(&cli.command, Commands::Download(_)) {
+        let preflight: Result<()> = (|| {
+            let yp = yaml_path(&cli)?;
+            if !yp.exists() {
+                return Err(anyhow!(
+                    "YAML configuration file not found: {}\n\
+                     Hint: pass the correct path with `-y <FILE>` or place polariseq.yaml next to the executable",
+                    yp.display()
+                ));
+            }
+            Ok(())
+        })();
+        if let Err(e) = preflight {
+            error!("Application failed: {}", e);
+            eprintln!(
+                "\nAn error occurred. Please check the log file for detailed error information."
+            );
+            return ExitCode::FAILURE;
+        }
+    }
+
     if !matches!(
         &cli.command,
         Commands::PublicData(_) | Commands::Validate(_) | Commands::Md5(_)
@@ -1323,7 +1346,13 @@ fn save_md5_files(
     } else {
         output_dir.to_path_buf()
     };
-    info!("Saving MD5 files to {}...", save_dir.display());
+    info!(
+        "Saving MD5 files to {}...",
+        save_dir
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| save_dir.display().to_string())
+    );
     let (r1_path, r2_path) = if let Some(acc) = accession {
         (
             save_dir.join(format!("R1_fastq_md5_{}.tsv", acc)),
@@ -1370,7 +1399,10 @@ fn save_metadata_tsv(
     } else {
         save_dir.join("ena_metadata.tsv")
     };
-    info!("Saving ENA metadata to {}...", path.display());
+    info!(
+        "Saving ENA metadata to {}...",
+        path.file_name().unwrap_or_default().to_string_lossy()
+    );
 
     let mut file = File::create(&path)?;
     if let Some(acc) = accession {
@@ -1543,6 +1575,10 @@ async fn download_with_aws(
                 || (fq_single.exists()
                     && fq_single.metadata().map(|m| m.len() > 0).unwrap_or(false));
 
+            // Captures fasterq-dump stderr so the final error branch can
+            // report *why* conversion failed.
+            let mut fqdump_error: Option<String> = None;
+
             if fq_exists {
                 info!(target: "download_detail", "[{}] FASTQ files already exist, skipping conversion.", run_id);
             } else {
@@ -1575,7 +1611,7 @@ async fn download_with_aws(
                     })?;
 
                 let estimated_fastq_size = sra_size * 3;
-                let mut child = Command::new(&fasterq_dump)
+                let child = Command::new(&fasterq_dump)
                     .arg("--split-3")
                     .arg("-e")
                     .arg(process_threads.to_string())
@@ -1617,14 +1653,19 @@ async fn download_with_aws(
                     }
                 });
 
-                let status = child.wait().await?;
+                let output = child.wait_with_output().await?;
                 extract_monitor.abort();
+                let fqdump_stderr = String::from_utf8_lossy(&output.stderr);
 
-                if !status.success() {
-                    warn!(
-                        "[{}] fasterq-dump exited with status: {}",
-                        run_id, status
+                if !output.status.success() {
+                    let detail = fqdump_stderr.trim().to_string();
+                    error!(
+                        "[{}] fasterq-dump exited with {}: {}",
+                        run_id,
+                        output.status,
+                        detail
                     );
+                    fqdump_error = Some(detail);
                 }
             }
 
@@ -1722,15 +1763,18 @@ async fn download_with_aws(
                 info!("[{}] Done", run_id);
                 Ok(())
             } else {
+                let reason = fqdump_error
+                    .as_deref()
+                    .unwrap_or("no FASTQ output found");
                 error!(
-                    "[{}] Conversion failed and no FASTQ output found.",
-                    run_id
+                    "[{}] Conversion failed: {}",
+                    run_id, reason
                 );
                 let mut map = progress_store.write().await;
                 if let Some(rp) = map.get_mut(&run_id) {
                     rp.stage = RunStage::Failed;
                 }
-                Err(anyhow::anyhow!("Conversion failed for {}", run_id))
+                Err(anyhow::anyhow!("Conversion failed for {}: {}", run_id, reason))
             }
         });
 
