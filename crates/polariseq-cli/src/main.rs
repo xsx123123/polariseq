@@ -1244,6 +1244,10 @@ fn print_summary_line(label: &str, passed: usize, failed: usize, fail_word: &str
     eprintln!("\n{}  ·  {}  ·  {}", head, ok, bad);
 }
 
+fn build_stdout_filter(log_level: &str, env_filter: Option<EnvFilter>) -> EnvFilter {
+    env_filter.unwrap_or_else(|| EnvFilter::new(log_level))
+}
+
 fn setup_logging(
     output_dir: &Path,
     log_level: &str,
@@ -1271,15 +1275,13 @@ fn setup_logging(
         .with_timer(fmt::time::LocalTime::rfc_3339())
         .with_filter(EnvFilter::new("debug"));
 
-    let mut stdout_filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(log_level));
-    if let Ok(directive) = "download_detail=off".parse() {
-        stdout_filter = stdout_filter.add_directive(directive);
-    }
+    let stdout_filter = build_stdout_filter(log_level, EnvFilter::try_from_default_env().ok());
 
     // stdout layer writes through MpWriter so that log messages are rendered
     // above active progress bars via MultiProgress::println(), preventing
-    // display corruption when progress bars and logs share the terminal.
+    // display corruption when progress bars and logs share the terminal. Keep
+    // `download_detail` enabled so integrity checks and processing stages are
+    // visible while the compact status bar is running.
     match format {
         LogFormat::Json => {
             let json_layer = fmt::layer()
@@ -1844,4 +1846,37 @@ async fn download_with_ftp(
         args.multithreads,
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tracing_subscriber::layer::{Context, SubscriberExt};
+    use tracing_subscriber::{Layer, Registry};
+
+    struct EventCounter(Arc<AtomicUsize>);
+
+    impl<S> Layer<S> for EventCounter
+    where
+        S: Subscriber,
+    {
+        fn on_event(&self, _event: &Event<'_>, _ctx: Context<'_, S>) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[test]
+    fn stdout_filter_keeps_download_detail_visible() {
+        let seen = Arc::new(AtomicUsize::new(0));
+        let subscriber = Registry::default().with(
+            EventCounter(seen.clone()).with_filter(build_stdout_filter("info", None)),
+        );
+
+        tracing::subscriber::with_default(subscriber, || {
+            info!(target: "download_detail", "SRR000001 │ MD5 OK (1.00s)");
+        });
+
+        assert_eq!(seen.load(Ordering::Relaxed), 1);
+    }
 }
