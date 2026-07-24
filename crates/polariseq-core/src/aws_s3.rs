@@ -14,8 +14,8 @@ use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::str;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
 use tokio::io::AsyncReadExt;
 use tokio::sync::{mpsc, Mutex};
 use tracing::{info, warn};
@@ -80,6 +80,49 @@ struct ProgressData {
 // 2. Metadata Parsing and Conversion
 // ============================
 
+/// NCBI E-utilities (`efetch.fcgi`) allow only ~3 requests/second without an
+/// API key. Every concurrent download task resolves its SRA metadata through
+/// [`SraUtils::get_metadata`], so a burst of parallel runs easily exceeds that
+/// limit and the server answers `429 Too Many Requests`. Because all tasks then
+/// backed off by the *same* flat delay, they retried in lockstep and
+/// re-triggered 429 round after round — the "download stuck before it starts"
+/// symptom. This slot-based pacer is shared process-wide and guarantees we never
+/// issue requests faster than `MIN_INTERVAL`, desynchronizing the tasks at the
+/// source instead of letting them herd.
+static NCBI_NEXT_SLOT: OnceLock<std::sync::Mutex<Instant>> = OnceLock::new();
+
+async fn ncbi_rate_limit_wait() {
+    // ~2.8 req/s, comfortably under NCBI's 3 req/s cap for keyless access.
+    const MIN_INTERVAL: Duration = Duration::from_millis(350);
+    let reserved = {
+        let gate = NCBI_NEXT_SLOT.get_or_init(|| std::sync::Mutex::new(Instant::now()));
+        // Recover the poisoned mutex rather than panicking the whole download.
+        let mut guard = gate.lock().unwrap_or_else(|e| e.into_inner());
+        let now = Instant::now();
+        // Reserve the next free slot (never in the past), then push the gate
+        // forward so the following caller gets a later, distinct slot. The lock
+        // is released before we sleep, so callers queue by slot, not by waiting
+        // on each other.
+        let slot = (*guard).max(now);
+        *guard = slot + MIN_INTERVAL;
+        slot
+    };
+    let delay = reserved.saturating_duration_since(Instant::now());
+    tokio::time::sleep(delay).await;
+}
+
+/// Cheap dependency-free jitter (0..=max_ms) to desynchronize retry backoffs
+/// across concurrent tasks. SplitMix64 stepped by an atomic counter gives each
+/// call a distinct value — we only need to break lockstep, not be cryptographic.
+fn jitter_millis(max_ms: u64) -> u64 {
+    static COUNTER: AtomicU64 = AtomicU64::new(0x9E37_79B9_7F4A_7C15);
+    let mut z = COUNTER.fetch_add(0x9E37_79B9_7F4A_7C15, Ordering::Relaxed);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^= z >> 31;
+    z % (max_ms + 1)
+}
+
 pub struct SraUtils;
 
 impl SraUtils {
@@ -92,11 +135,14 @@ impl SraUtils {
         // Modification 1: Timeout increased to 60 seconds
         let client = Client::builder().timeout(Duration::from_secs(60)).build()?;
 
-        let mut attempt = 0;
-        let max_retries = 10; // Modification 2: Max retries increased to 10
+        let mut attempt: u32 = 0;
+        let max_retries: u32 = 10; // Modification 2: Max retries increased to 10
 
         loop {
             attempt += 1;
+            // Pace every NCBI call process-wide so concurrent runs can't burst
+            // past the E-utilities rate limit and trip a 429 thundering-herd.
+            ncbi_rate_limit_wait().await;
             let result = client.get(&url).send().await;
 
             match result {
@@ -104,17 +150,32 @@ impl SraUtils {
                     if resp.status().is_success() {
                         let text = resp.text().await?;
                         return parse_sra_xml(&text);
-                    } else {
-                        if attempt >= max_retries {
-                            return Err(anyhow!("NCBI API Error: Status {}", resp.status()));
-                        }
-                        warn!(
-                            "[Network] NCBI Server Error ({}), retrying ({}/{})...",
-                            resp.status(),
-                            attempt,
-                            max_retries
-                        );
                     }
+
+                    if attempt >= max_retries {
+                        return Err(anyhow!("NCBI API Error: Status {}", resp.status()));
+                    }
+
+                    // Transient error (429 rate-limit or 5xx). Honor the server's
+                    // Retry-After when it sends one; otherwise use exponential
+                    // backoff. Jitter keeps concurrent tasks from retrying in
+                    // lockstep and re-colliding on the rate limit.
+                    let status = resp.status();
+                    let retry_after_secs = resp
+                        .headers()
+                        .get(header::RETRY_AFTER)
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|v| v.trim().parse::<u64>().ok());
+
+                    let wait_secs = retry_after_secs
+                        .unwrap_or_else(|| std::cmp::min(60, 2_u64.saturating_pow(attempt)))
+                        + jitter_millis(2000) / 1000;
+
+                    warn!(
+                        "[Network] NCBI Server Error ({}), retrying in {}s ({}/{})...",
+                        status, wait_secs, attempt, max_retries
+                    );
+                    tokio::time::sleep(Duration::from_secs(wait_secs.max(1))).await;
                 }
                 Err(e) => {
                     if attempt >= max_retries {
@@ -124,16 +185,17 @@ impl SraUtils {
                             e
                         ));
                     }
-                    // Modification 3: Retry wait time increased to 10 seconds (more stable)
+                    // Modification 3: exponential backoff (was a flat 10s) with
+                    // jitter, so connection blips recover quickly without herding.
+                    let wait_secs =
+                        std::cmp::min(60, 2_u64.saturating_pow(attempt)) + jitter_millis(2000) / 1000;
                     warn!(
-                        "[Network] Connection failed: {}. Retrying in 10s ({}/{})...",
-                        e, attempt, max_retries
+                        "[Network] Connection failed: {}. Retrying in {}s ({}/{})...",
+                        e, wait_secs, attempt, max_retries
                     );
+                    tokio::time::sleep(Duration::from_secs(wait_secs.max(1))).await;
                 }
             }
-
-            // Wait 10 seconds
-            tokio::time::sleep(Duration::from_secs(10)).await;
         }
     }
 }
@@ -673,17 +735,31 @@ async fn download_chunk_http(
     global_bytes: Arc<AtomicU64>,
     pause_token: Option<PauseToken>,
 ) -> Result<()> {
+    const MAX_TOTAL_ATTEMPTS: u32 = 50;
+    const READ_TIMEOUT: Duration = Duration::from_secs(120);
+
     let mut retry = 0;
+    let mut total_attempts: u32 = 0;
     let mut current_offset = chunk.start;
 
     loop {
-        // Yield while paused so the user can pause/resume the download.
         if let Some(token) = &pause_token {
             token.wait_while_paused().await;
         }
 
         if current_offset > chunk.end {
             return Ok(());
+        }
+
+        total_attempts += 1;
+        if total_attempts > MAX_TOTAL_ATTEMPTS {
+            return Err(anyhow!(
+                "Chunk {} aborted after {} total attempts (offset {}/{})",
+                chunk.id,
+                MAX_TOTAL_ATTEMPTS,
+                current_offset - chunk.start,
+                chunk.end - chunk.start + 1
+            ));
         }
 
         let range_header = format!("bytes={}-{}", current_offset, chunk.end);
@@ -694,6 +770,30 @@ async fn download_chunk_http(
             .await;
 
         if let Ok(response) = resp {
+            // Handle 429 rate limiting with Retry-After and exponential backoff
+            if response.status() == StatusCode::TOO_MANY_REQUESTS {
+                retry += 1;
+                if retry > 15 {
+                    return Err(anyhow!(
+                        "Chunk {} rate-limited (429) after {} retries",
+                        chunk.id,
+                        retry
+                    ));
+                }
+                let wait_secs = response
+                    .headers()
+                    .get(header::RETRY_AFTER)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .unwrap_or_else(|| std::cmp::min(120, 2_u64.saturating_pow(retry)));
+                warn!(
+                    "[RateLimit] 429 Too Many Requests on chunk {}, backing off {}s (retry {}/15)",
+                    chunk.id, wait_secs, retry
+                );
+                tokio::time::sleep(Duration::from_secs(wait_secs)).await;
+                continue;
+            }
+
             let expected_content_range = format!("bytes {}-{}/", current_offset, chunk.end);
             let has_expected_range = response
                 .headers()
@@ -709,9 +809,13 @@ async fn download_chunk_http(
                         response.headers().get(header::CONTENT_RANGE)
                     ));
                 }
-                tokio::time::sleep(Duration::from_secs(retry)).await;
+                tokio::time::sleep(Duration::from_secs(retry as u64)).await;
                 continue;
             }
+
+            // Successful 206 response — reset retry counter
+            retry = 0;
+
             let mut stream = response.bytes_stream();
             let mut file = std::fs::OpenOptions::new().write(true).open(filepath)?;
             file.seek(SeekFrom::Start(current_offset))?;
@@ -719,15 +823,14 @@ async fn download_chunk_http(
             let mut stream_error = false;
             let offset_start = current_offset;
 
-            while let Some(item) = stream.next().await {
-                // Check pause inside the byte stream loop so an active
-                // HTTP connection also stops downloading immediately.
+            loop {
                 if let Some(token) = &pause_token {
                     token.wait_while_paused().await;
                 }
 
+                let item = tokio::time::timeout(READ_TIMEOUT, stream.next()).await;
                 match item {
-                    Ok(bytes) => {
+                    Ok(Some(Ok(bytes))) => {
                         if file.write_all(&bytes).is_err() {
                             stream_error = true;
                             break;
@@ -736,7 +839,18 @@ async fn download_chunk_http(
                         global_bytes.fetch_add(len, Ordering::Relaxed);
                         current_offset += len;
                     }
+                    Ok(Some(Err(_))) => {
+                        stream_error = true;
+                        break;
+                    }
+                    Ok(None) => break,
                     Err(_) => {
+                        warn!(
+                            "[Timeout] Read timeout ({}s) on chunk {} at offset {}",
+                            READ_TIMEOUT.as_secs(),
+                            chunk.id,
+                            current_offset
+                        );
                         stream_error = true;
                         break;
                     }
@@ -747,7 +861,6 @@ async fn download_chunk_http(
                 return Ok(());
             }
 
-            // If we made progress, reset retry counter
             if current_offset > offset_start {
                 retry = 0;
             }
