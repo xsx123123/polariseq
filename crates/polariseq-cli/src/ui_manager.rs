@@ -5,8 +5,9 @@
 //! status bar is inserted as the last member of the `MultiProgress` ordering
 //! and keeps refreshing in place; transient per-file bars are inserted with
 //! `insert_from_back(1)` (see `aws_s3.rs`) so they always land just above it.
-//! Completed files are already `finish_and_clear()`-ed by the engine — we only
-//! record their metadata here for the status-bar counts.
+//! Completed files are already `finish_and_clear()`-ed by the engine. The
+//! manager also creates transient conversion/compression bars and records
+//! metadata for the status-bar counts.
 //!
 //! No crossterm / keyboard interaction: this is purely a passive status line.
 
@@ -52,6 +53,7 @@ pub enum Mode {
 }
 
 pub struct UiManager {
+    mp: MultiProgress,
     status_pb: ProgressBar,
     mode: Mode,
     total_items: AtomicU64,
@@ -74,6 +76,7 @@ impl UiManager {
         status_pb.enable_steady_tick(Duration::from_millis(100));
 
         let manager = Arc::new(Self {
+            mp,
             status_pb,
             mode,
             total_items: AtomicU64::new(total),
@@ -93,6 +96,20 @@ impl UiManager {
         *manager.tick_handle.lock().unwrap() = Some(tick_handle);
 
         manager
+    }
+
+    /// Create a transient bar for a non-network phase of one SRA run. The bar
+    /// is inserted immediately above the pinned summary line, matching the
+    /// download and checksum bars owned by the S3 downloader.
+    pub fn phase_bar(&self, run_id: &str, phase: &str, total_bytes: u64) -> ProgressBar {
+        let pb = self
+            .mp
+            .insert_from_back(1, ProgressBar::new(total_bytes.max(1)));
+        pb.set_style(phase_bar_style());
+        pb.set_prefix(run_id.to_string());
+        pb.set_message(phase.to_string());
+        pb.enable_steady_tick(Duration::from_millis(100));
+        pb
     }
 
     /// Stop the refresh loop and clear the status bar.
@@ -253,6 +270,17 @@ fn status_bar_style() -> ProgressStyle {
         .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏ ")
 }
 
+fn phase_bar_style() -> ProgressStyle {
+    // Keep phase rows compact enough for an 80-column terminal. Unlike the
+    // download bar, conversion and compression do not have a reliable ETA.
+    ProgressStyle::with_template(
+        "{spinner:.cyan} {prefix:<11!.bold.cyan} {bar:14.cyan/bright_black} {percent:>3}% {binary_bytes:>8}/{binary_total_bytes:<8} {wide_msg:.dim}",
+    )
+    .expect("valid phase progress template")
+    .progress_chars("█▉▊▋▌▍▎▏░")
+    .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏ ")
+}
+
 /// Colorize one status-bar segment: `icon label` with a fixed ANSI color name.
 fn paint_seg(icon: &str, label: &str, color: &str) -> String {
     // Raw ANSI so we do not pull nu-ansi-term into the ui_manager crate path.
@@ -361,6 +389,19 @@ mod tests {
         let queued = 4usize.saturating_sub(c + f + a);
         assert_eq!(queued, 1);
 
+        ui.stop();
+    }
+
+    #[tokio::test]
+    async fn phase_bar_exposes_the_current_run_and_phase() {
+        let ui = hidden_manager(Mode::PublicData, 0);
+        let pb = ui.phase_bar("SRR34661448", "Converting · fasterq-dump", 2_048);
+
+        assert_eq!(pb.prefix(), "SRR34661448");
+        assert_eq!(pb.message(), "Converting · fasterq-dump");
+        assert_eq!(pb.length(), Some(2_048));
+
+        pb.finish_and_clear();
         ui.stop();
     }
 
