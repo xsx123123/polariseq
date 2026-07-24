@@ -1,13 +1,32 @@
-# Polariseq 命令行显示样式规范
+# Polariseq 命令行显示与交互规范
 
-> 本文基于 Polariseq `v1.4.2` 当前 Rust 实现整理，目标是把现有 CLI 的视觉语言、输出层级和实现方式沉淀为一套可直接迁移到其他 Rust 工具的规范。
+> 本文基于 Polariseq `v1.4.3` 的 Rust CLI 实现整理。它既记录当前行为，也定义后续 Rust 工具应复用的终端显示、交互和帮助页约定。
+>
+> 文中版本号 `v1.4.3` 均为示例；实际实现应使用 `env!("CARGO_PKG_VERSION")`（见 §18.1）。
+
+## 0. 使用边界
+
+- **当前实现**：本文标记为"当前行为"的内容已由 Polariseq 代码实现；它是后续统一样式时的兼容基线。
+- **统一标准**：本文标记为"📌 统一要求"的内容适用于新工具。现有 Polariseq 尚未支持的项目应在后续重构时补齐，而不能误称为当前能力。
+- **面向对象**：帮助页与状态输出面向交互式终端用户；结构化日志和退出码面向脚本、CI 与外部调用方。
+- **术语**：命令是子命令（如 `download`），选项是 flag（如 `--output`），任务是一个可独立完成或失败的下载、校验或处理单元。
+
+### 30 秒速览
+
+| # | 核心规则 | 详见 |
+|---|---|---|
+| 1 | 静态信息向上沉淀，动态信息留在下方刷新，成功任务及时折叠，失败信息明确保留 | §3 |
+| 2 | 颜色具有语义：绿=成功、黄=警告/速度、红=失败、青=结构/活动 | §4 |
+| 3 | 所有交互式工具必须展示固定英文签名；非 TTY 时关闭 Banner | §5 |
+| 4 | 日志通过 `MultiProgress::println()` 避开进度条；终端和文件日志分层 | §7–8 |
+| 5 | 错误写 stderr + 非零退出码；文本中必须包含语义，不能只依赖颜色 | §11 |
 
 ## 1. 样式定位
 
 Polariseq 的 CLI 风格可以概括为：
 
 - **品牌明确**：顶层帮助和正常运行都显示大幅 ASCII Logo、产品副标题、版本号和一句品牌文案。
-- **信息密度高但层级清晰**：帮助页按输入、下载、过滤、高级、全局选项分组；运行日志固定为“时间 + 级别 + 模块 + 消息”。
+- **信息密度高但层级清晰**：帮助页按输入、下载、过滤、高级、全局选项分组；运行日志固定为"时间 + 级别 + 模块 + 消息"。
 - **动态信息稳定**：并发任务使用多进度条，最底部固定一条全局状态栏；普通日志始终打印在进度条上方。
 - **颜色具有语义**：绿色表示正常或成功，黄色表示警告或速度，红色表示失败，青色表示结构、对象名和活动状态。
 - **完成后自动收拢**：单文件任务成功后清除进度条，只保留必要日志和最终摘要，避免终端堆积大量已完成任务。
@@ -26,12 +45,14 @@ Polariseq 的 CLI 风格可以概括为：
 
 当前核心实现位置：
 
-- `crates/polariseq-cli/src/main.rs`：帮助页、Banner、日志格式、最终摘要、全局 `MultiProgress`。
-- `crates/polariseq-cli/src/ui_manager.rs`：底部全局状态栏和聚合速度。
-- `crates/polariseq-core/src/progress.rs`：下载、校验、普通 spinner 的统一模板。
-- `crates/polariseq-core/src/observer.rs`：core 与 CLI UI 之间的观察者接口。
+| 文件 | 职责 |
+|---|---|
+| `crates/polariseq-cli/src/main.rs` | 帮助页、Banner、日志格式（`ColoredFormatter`）、最终摘要（`print_summary_line()`）、全局 `MultiProgress`（`GLOBAL_MP`、`BARS_ACTIVE`、`MpWriter`）、程序名常量 `SCRIPT_NAME` |
+| `crates/polariseq-cli/src/ui_manager.rs` | 底部全局状态栏、聚合速度、`DownloadObserver` 实现 |
+| `crates/polariseq-core/src/progress.rs` | 下载、校验、普通 spinner、阶段条的统一模板 |
+| `crates/polariseq-core/src/observer.rs` | core 与 CLI UI 之间的观察者 trait 接口 |
 
-main.rs 中几个值得直接抽取的实现单元是：`HELP_STYLES`、`ColoredFormatter`、`MpWriter`、`GLOBAL_MP`、`BARS_ACTIVE` 和 `print_summary_line()`；详细下载事件使用 `target: "download_detail"`，终端通过 `download_detail=off` 默认隐藏，文件日志仍然保留。
+main.rs 中几个值得直接抽取的实现单元是：`HELP_STYLES`、`ColoredFormatter`、`MpWriter`、`GLOBAL_MP`、`BARS_ACTIVE` 和 `print_summary_line()`。详细下载事件使用 `target: "download_detail"`；当前终端日志保留这些事件，后续工具若日志过密可在终端 filter 中关闭该 target，但文件日志必须继续保留。
 
 ## 3. 终端信息层级
 
@@ -83,9 +104,10 @@ main.rs 中几个值得直接抽取的实现单元是：`HELP_STYLES`、`Colored
 红色粗体  31;1  非零失败数量
 白色粗体  37;1  当前/总字节数
 弱化显示  2     排队数量、零失败数量
+重置      0     每段末尾恢复默认样式（\x1b[0m）
 ```
 
-迁移到其他工具时，应优先保留“颜色语义”，不必机械保留具体颜色。例如品牌色可以替换，但成功、警告、失败之间必须保持稳定区分。
+迁移到其他工具时，应优先保留"颜色语义"，不必机械保留具体颜色。例如品牌色可以替换，但成功、警告、失败之间必须保持稳定区分。
 
 ## 5. 品牌 Banner
 
@@ -95,23 +117,55 @@ Banner 由四部分组成：
 
 1. 顶部空行，用于和 shell prompt 拉开距离。
 2. 六行粗体白色 ASCII Logo。
-3. 青色居中副标题：`Sequencing Data Toolkit  │  v1.4.2`。
-4. 青色居中双行品牌文案，结束后再留一个空行。
+3. 青色居中副标题：`Sequencing Data Toolkit  │  v{VERSION}`。
+4. 青色居中双行固定签名，结束后再留一个空行。
 
 视觉宽度以 **72 个字符**为基准，副标题和文案按字符数计算左侧填充。
 
-### 5.2 两种使用场景
+### 5.2 固定签名与完整示例
+
+> 📌 **统一要求**：每一个交互式 Rust 工具都必须在正常启动和顶层 `--help` 的开头展示以下固定英文签名。不翻译、不改写、不替换为各工具自己的 slogan；各工具只替换 ASCII Logo、产品副标题和版本号。
+
+```text
+    ██████╗  ██████╗ ██╗      █████╗ ██████╗ ██╗███████╗███████╗ ██████╗
+    ██╔══██╗██╔═══██╗██║     ██╔══██╗██╔══██╗██║██╔════╝██╔════╝██╔═══██╗
+    ██████╔╝██║   ██║██║     ███████║██████╔╝██║███████╗█████╗  ██║   ██║
+    ██╔═══╝ ██║   ██║██║     ██╔══██║██╔══██╗██║╚════██║██╔══╝  ██║▄▄ ██║
+    ██║     ╚██████╔╝███████╗██║  ██║██║  ██║██║███████║███████╗╚██████╔╝
+    ╚═╝      ╚═════╝ ╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝╚═╝╚══════╝╚══════╝ ╚══▀▀═╝
+
+                   Sequencing Data Toolkit  │  v1.4.3
+
+    We are only borrowing these atoms from the universe, for a brief
+                       taste of this world.
+```
+
+Logo 使用粗体白色，副标题和固定签名使用青色。固定签名必须按下列两行换行，以在 72 列宽度下保持稳定布局：
+
+```text
+We are only borrowing these atoms from the universe, for a brief
+taste of this world.
+```
+
+### 5.3 两种使用场景
 
 Polariseq 为 Banner 保留了两套入口：
 
-- **帮助页 Banner**：通过 `clap` 的 `before_help` 注入，直接内嵌 ANSI escape。
-- **正常运行 Banner**：在参数解析后调用 `print_banner()`，使用 `nu-ansi-term` 着色。
+- **帮助页 Banner**：通过 `clap` 的 `before_help` 注入，直接内嵌 ANSI escape。当前实现中版本号硬编码在字符串中。
+- **正常运行 Banner**：在参数解析后调用 `print_banner()`，使用 `nu-ansi-term` 着色，副标题动态拼接 `VERSION` 常量。
 
 这样做可以保证 `polariseq --help` 和真正执行命令时都有完整品牌识别。
 
-### 5.3 可复用模板
+> 📌 **统一要求**：帮助页 Banner 的版本号也应动态拼接，避免与 `print_banner()` 不一致（见 §18.1）。
+
+机器可读的 JSON 模式、输出重定向和 `TERM=dumb` 是例外：这些模式遵循 §15 的降级规则，不输出 Logo 或固定签名，以避免污染数据流。
+
+### 5.4 可复用模板
+
+以下模板展示推荐的 Banner 实现结构（Logo 和签名文本取自 §5.2，此处不重复）：
 
 ```rust
+// ⚠️ 统一要求：使用 CARGO_PKG_VERSION，不要硬编码版本号（见 §18.1）
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const LOGO_WIDTH: usize = 72;
 
@@ -122,7 +176,7 @@ fn center(text: &str) -> String {
 
 fn print_banner() {
     println!();
-    for line in LOGO_LINES {
+    for line in LOGO_LINES {  // 引用 §5.2 中的六行 Logo
         println!("{}", Color::White.bold().paint(line));
     }
     println!(
@@ -130,17 +184,21 @@ fn print_banner() {
         Color::Cyan.paint(center(&format!("Your Toolkit  │  v{VERSION}")))
     );
     println!();
-    println!("{}", Color::Cyan.paint(center("Your product sentence.")));
+    for line in SIGNATURE_LINES {  // 引用 §5.2 中的两行固定签名
+        println!("{}", Color::Cyan.paint(center(line)));
+    }
     println!();
 }
 ```
 
-### 5.4 复用注意事项
+### 5.5 复用注意事项
 
 - Logo 建议控制在 **60–80 列**，否则小终端容易换行。
 - 居中时使用 `chars().count()`，不要直接使用字节长度；如果包含中文或宽字符，建议改用 `unicode-width`。
 - 版本号应统一使用 `env!("CARGO_PKG_VERSION")`，避免源码常量和 `Cargo.toml` 不一致。
-- 在非交互输出、管道或 CI 中，可以考虑通过 `std::io::IsTerminal` 关闭大 Banner。
+- 在非交互输出、管道或 CI 中，必须通过 `std::io::IsTerminal` 关闭大 Banner 和固定签名。
+
+> 📌 **统一要求**：当前 Polariseq 的 `print_banner()` 未做 TTY 检测，Banner 会输出到管道和重定向目标（见 §18.6）。
 
 ## 6. 帮助页样式
 
@@ -213,7 +271,7 @@ const HELP_STYLES: Styles = Styles::styled()
 #[command(
     version,
     about = "One-line product description",
-    color = clap::ColorChoice::Always,
+    color = clap::ColorChoice::Always,  // 见 §15 降级讨论
     styles = HELP_STYLES,
     before_help = HELP_LOGO,
     help_template = r#"{before-help}
@@ -248,6 +306,21 @@ Polariseq 使用 `help_heading` 给参数建立语义分组：
 - 全局参数永远放在最后，减少对主流程参数的干扰。
 - 必填参数应设置清晰的 `value_name`，并让 `Usage` 自动展示约束。
 - 布尔开关不显示 `[default: false]`，保持帮助页简洁。
+
+### 6.5 命令解析、错误与退出码
+
+这是 CLI 交互契约的一部分，必须和视觉样式一起统一：
+
+| 场景 | 当前行为 | 退出码 | 统一要求 |
+|---|---|---|---|
+| `--help` / 子命令 `--help` | 成功退出；顶层显示 Banner，子命令不重复 | `0` | 保持该层级 |
+| 无子命令 | clap 显示顶层帮助 | `2` | 新工具保持同样行为，或显式选择成功显示帮助；不要静默执行 |
+| 非法选项或参数值 | clap 红色 `error:`、`Usage:` 与帮助提示 | `2` | 参数错误必须由解析器处理，不能在业务逻辑中吞掉 |
+| 可恢复的业务异常 | `WARN` 说明原因和下一步 | 视情况 | 文本必须表达语义，不能只依赖颜色 |
+| 不可恢复的业务错误 | `ERROR` 记录完整错误链 + 简短提示 | `1` | 错误写 stderr，并保证非零退出码 |
+| 任务部分失败 | 汇总所有任务；停止动态 UI 后报错 | `1` | 不得打印成功完成信息 |
+
+业务逻辑的输入约束应尽量放在 `clap` 声明中：必填值、枚举候选值、互斥/依赖选项和 `arg_required_else_help`。只有需要访问配置、文件系统或远端服务的约束才放在命令处理函数中。
 
 ## 7. 日志行样式
 
@@ -289,6 +362,8 @@ ERROR  红色、bold
 
 模块名只取 `target` 最后一个 `::` 片段，超过 12 字符时截断。固定宽度让连续日志形成稳定的视觉列。
 
+> 📌 **统一要求**：当前模块截断使用字节切片 `&target[..12]`，对非 ASCII target 可能 panic。新工具应使用 `char_indices` 或 `unicode-width` 做安全截断（见 §18.5）。
+
 ### 7.3 日志与进度条共存
 
 不能直接让 `tracing` 写普通 stderr，否则日志会切碎正在刷新的进度条。Polariseq 使用以下策略：
@@ -306,18 +381,18 @@ ERROR  红色、bold
 static GLOBAL_MP: LazyLock<MultiProgress> = LazyLock::new(MultiProgress::new);
 static BARS_ACTIVE: AtomicBool = AtomicBool::new(false);
 
-struct ProgressAwareWriter {
-    buffer: Vec<u8>,
+struct MpWriter {
+    buf: Vec<u8>,
 }
 
-impl Write for ProgressAwareWriter {
+impl Write for MpWriter {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        self.buffer.extend_from_slice(bytes);
+        self.buf.extend_from_slice(bytes);
         Ok(bytes.len())
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        let message = String::from_utf8_lossy(&self.buffer);
+        let message = String::from_utf8_lossy(&self.buf);
         let message = message.trim_end_matches('\n');
         if !message.is_empty() {
             if BARS_ACTIVE.load(Ordering::Relaxed) {
@@ -326,8 +401,15 @@ impl Write for ProgressAwareWriter {
                 eprintln!("{message}");
             }
         }
-        self.buffer.clear();
+        self.buf.clear();
         Ok(())
+    }
+}
+
+// 当前实现还额外提供了 Drop，防止 writer 被丢弃时丢失未刷新的日志：
+impl Drop for MpWriter {
+    fn drop(&mut self) {
+        let _ = self.flush();
     }
 }
 ```
@@ -338,10 +420,14 @@ Polariseq 同时维护终端日志和文件日志：
 
 | 通道 | 格式 | 颜色 | 默认级别 | 目的 |
 |---|---|---|---|---|
-| 终端 | 自定义紧凑文本或 JSON | 文本模式有颜色 | 用户指定，默认 `info` | 实时可读 |
+| 终端 stderr | 自定义紧凑文本或 JSON | 文本模式有颜色 | 用户指定，默认 `info` | 实时可读，不污染进度区域 |
 | 文件 | tracing 标准文本 | 无 ANSI | `debug` | 完整审计和排错 |
 
-文件日志包含 RFC 3339 时间、target 和 thread ID。终端默认隐藏 `download_detail` target，避免大量分块下载细节淹没主界面；文件仍保留这些 debug 信息。
+文件日志包含 RFC 3339 时间、target 和 thread ID。当前终端保留 `download_detail` target，使下载完整性检查和处理阶段可见；如果后续工具将其关闭以保持紧凑，文件日志仍必须保留这些调试信息。
+
+当前 `--log-format json` 只改变 tracing 事件的格式；Banner、进度条和最终的简短错误提示仍可能出现。因此它不是严格的"stdout-only JSON"机器接口。
+
+> 📌 **统一要求**：为机器消费设计的 JSON 模式必须关闭 Banner 和动态 UI，并将所有 JSON 写入 stdout、所有人类诊断写入 stderr（见 §18.6）。
 
 日志文件名规则：
 
@@ -382,8 +468,8 @@ ProgressStyle::with_template(
      ETA {eta_precise:>8} \
      {msg:.dim}",
 )?
-.progress_chars("█▉▊▋▌▍▎▏░")
-.tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏ ");
+.progress_chars(PROGRESS_CHARS)  // 见 §9.4
+.tick_chars(SPINNER_TICKS)       // 见 §9.4
 ```
 
 设计细节：
@@ -400,47 +486,58 @@ ProgressStyle::with_template(
 ```rust
 ProgressStyle::with_template(
     "{spinner:.yellow} \
-     {prefix:<14.bold.yellow} \
+     {prefix:<26!.yellow.dim} \
      {bar:28.green/bright_black} \
      {percent:>3}% \
      {binary_bytes:>9}/{binary_total_bytes:<9} \
      {msg:.dim}",
-)?;
+)?
+.progress_chars(PROGRESS_CHARS)
+.tick_chars(SPINNER_TICKS)
 ```
 
-校验阶段移除速度和 ETA，视觉上更短；黄色 spinner/prefix 表示“正在检查”，绿色 bar 表示已经校验通过的字节区域。
+校验阶段移除速度和 ETA，视觉上更短；黄色 spinner/prefix 表示"正在检查"，绿色 bar 表示已经校验通过的字节区域。prefix 固定为 26 列并硬截断，MD5 文件名可在调用方做中间截断，保留开头和扩展名。
 
 ### 9.3 非定长任务 spinner
 
 ```rust
 ProgressStyle::with_template(
     "{spinner:.green} {prefix:<18.bold.cyan} {msg:.dim}"
-)?;
+)?
+.tick_chars(SPINNER_TICKS)
 ```
 
 适用于安装依赖、提取压缩包、等待外部命令等没有可靠 total 的任务。
 
-### 9.4 动画字符
+### 9.4 动画字符（统一定义）
 
-统一 spinner：
+所有进度条和 spinner 共享以下字符集，各处通过常量引用，不重复定义：
 
-```text
-⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏
-```
-
-统一细粒度进度字符：
-
-```text
-█ ▉ ▊ ▋ ▌ ▍ ▎ ▏ ░
+```rust
+pub const SPINNER_TICKS: &str = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏ ";
+pub const PROGRESS_CHARS: &str = "█▉▊▋▌▍▎▏░";
 ```
 
 相比只用 `#` 和 `-`，八分之一块字符可以让较短的 28 列进度条仍然显得平滑。
+
+### 9.5 转换与压缩阶段条
+
+下载后的 `fasterq-dump` 转换和 gzip 压缩使用更紧凑的阶段条，不展示不可靠的 ETA：
+
+```text
+{spinner:.cyan} {prefix:<11!} {bar:14} {percent:>3}% {bytes:>8}/{total:<8} {wide_msg:.dim}
+```
+
+- spinner 和 prefix 使用青色，表明这是活动处理阶段而不是网络校验。
+- prefix 预算为 11 列，bar 为 14 列，确保 80 列终端仍可阅读。
+- 监控到的字节数最多显示到 99%，只有阶段真正成功后才清除任务条并在全局状态中计入完成。
+- 所有短生命周期任务均使用 `finish_and_clear()`；错误任务允许保留一条明确的失败消息供用户定位。
 
 ## 10. 全局底部状态栏
 
 ### 10.1 固定布局
 
-状态栏位于 `MultiProgress` 最后一行，活动任务插入到它的上一行。模板为：
+状态栏位于 `MultiProgress` 最后一行，活动任务通过 `insert_from_back(1)` 插入到它的上一行。模板为：
 
 ```text
 {spinner} ✓ N done · ↓ N active · … N queued · ! N failed · ⚡ X.X MiB/s · 📦 current/total
@@ -463,16 +560,27 @@ ProgressStyle::with_template(
 | 速度 | `⚡` | 黄色粗体 | 所有活动下载的聚合速度 |
 | 流量 | `📦` | 白色粗体 | 当前活动任务累计字节/总字节 |
 
+每段由 `paint_seg(icon, label, color)` 生成，格式为 `\x1b[{code}m{icon} {label}\x1b[0m`，段间以 ` · ` 分隔。
+
 ### 10.3 刷新与速度平滑
 
 - UI 刷新周期：**100 ms**。
-- 速度采样窗口：**3 秒**。
+- 速度采样窗口：**3 秒**（`SPEED_WINDOW`）。
 - 速度按活动任务共享字节计数器求和后计算。
 - 当活动字节总和下降时，说明某个任务已结束并被移除，立即清空旧采样，避免出现负速度。
 - 使用 MiB/s，保留 1 位小数。
-- 字节数使用二进制单位：`B/KiB/MiB/GiB/TiB/PiB`。
+- 字节数使用二进制单位：`B/KiB/MiB/GiB/TiB/PiB`（由 `human_binary_bytes()` 格式化）。
 
 ### 10.4 生命周期
+
+`UiManager` 支持两种运行模式，对应不同的数据来源：
+
+| 模式 | 数据来源 | 适用场景 |
+|---|---|---|
+| `Mode::Sra` | 从 `ProgressStore`（`RwLock<HashMap>`）读取完成/失败/活动计数 | SRA/ENA 下载 |
+| `Mode::PublicData` | 从内部 `completed`/`failed`/`live` 列表读取 | 公共数据下载 |
+
+生命周期流程：
 
 ```text
 UiManager::start()
@@ -482,6 +590,7 @@ UiManager::start()
 
 任务开始
   └─ observer.register(id, total) -> 返回共享 AtomicU64
+     （register 内部会先 retain 清除同 id 的残留条目，防止计数泄漏）
 
 下载推进
   └─ core 更新 AtomicU64
@@ -494,7 +603,7 @@ UiManager::start()
   └─ UiManager::stop() -> abort 刷新任务并清除状态栏
 ```
 
-这个观察者结构值得复用：核心下载库只依赖 trait，不依赖 CLI crate 或具体终端组件，因此同一核心可以接 CLI、GUI 或测试观察器。
+这个观察者结构值得复用：核心下载库只依赖 `DownloadObserver` trait（所有方法均有默认空操作），不依赖 CLI crate 或具体终端组件，因此同一核心可以接 CLI、GUI 或测试观察器。
 
 ## 11. 成功、失败与最终摘要
 
@@ -639,7 +748,7 @@ tracing-subscriber = { version = "0.3", features = [
 
 ## 15. 跨平台与降级策略
 
-当前样式大量使用 ANSI、Braille spinner、Unicode 方块和 emoji。迁移时建议加入以下降级：
+当前样式大量使用 ANSI、Braille spinner、Unicode 方块和 emoji。下表是**统一要求**，并非对 Polariseq 当前能力的描述；迁移或重构时必须加入相应降级：
 
 | 环境 | 建议行为 |
 |---|---|
@@ -726,28 +835,33 @@ fn muted(text: impl Display) -> String;
 
 这些不影响现有风格总结，但在复制到新工具前建议修正：
 
-1. **版本号存在重复来源**：`VERSION`、`Cargo.toml` 和帮助页 Logo 字符串都包含版本，建议统一为 `env!("CARGO_PKG_VERSION")` 并动态拼接。
-2. **帮助页强制颜色**：`ColorChoice::Always` 方便品牌展示，但重定向到文件时会保留 escape，通用 CLI 建议用 `Auto`。
-3. **Banner 居中未处理宽字符**：当前按 Unicode scalar 数量计算；中文、全角字符或组合字符可能不是真实终端宽度。
-4. **状态栏直接拼 ANSI**：可运行，但语义颜色分散；建议抽取 theme 层，并感知 `NO_COLOR`。
-5. **模块名按字节切片**：当前目标通常是 ASCII，因此正常；若 target 含非 ASCII，直接 `[..12]` 可能落在 UTF-8 字符中间。
-6. **JSON 模式与动态 UI 需明确边界**：机器消费 stdout 时，最佳实践是 JSON 输出和人类进度显示彻底分流。
-7. **窄终端适配不足**：下载进度行信息完整但较宽，可以依据 terminal width 提供 compact 模板。
+| # | 优先级 | 问题 | 影响 | 建议修复 |
+|---|---|---|---|---|
+| 1 | **P0** | 版本号存在三个来源：`VERSION = "1.4.3"`、`Cargo.toml`、`HELP_LOGO` 字符串 | 发版时漏改任一处导致版本显示不一致 | 统一为 `env!("CARGO_PKG_VERSION")`，`HELP_LOGO` 改为 `format!` 动态拼接 |
+| 2 | **P1** | `print_banner()` 无 TTY 检测，Banner 输出到管道/文件 | 污染非交互输出 | 调用前检查 `std::io::IsTerminal` |
+| 3 | **P1** | 未检查 `NO_COLOR` 环境变量 | 不尊重用户禁用颜色的意愿 | 在 theme 层感知 `NO_COLOR`，`ColorChoice` 改为 `Auto` |
+| 4 | **P1** | JSON 模式未关闭 Banner 和动态 UI | 机器消费 stdout 时混入 ANSI 和进度条 | JSON 模式下跳过 Banner，禁用 `MultiProgress` |
+| 5 | **P2** | 模块名截断使用字节切片 `&target[..12]` | 非 ASCII target 可能 panic | 改用 `char_indices` 安全截断 |
+| 6 | **P2** | 状态栏直接拼接 ANSI code | 语义颜色分散，不感知 `NO_COLOR` | 抽取 theme 层，用语义函数生成 |
+| 7 | **P2** | Banner 居中按 scalar 计数 | 含中文或组合字符时宽度不准 | 改用 `unicode-width` |
+| 8 | **P2** | 下载进度行信息较宽 | 窄终端（<80 列）换行 | 依据 terminal width 提供 compact 模板 |
 
-## 19. 一套可直接复用的最终视觉规范
-
-如果后续工具希望保留 Polariseq 的“家族风格”，可以直接遵循以下规则：
+## 19. 速查卡片
 
 ```text
-品牌：粗体白 Logo + 青色副标题
-帮助：绿色标题 + 蓝色命令/选项 + 青色占位符
-日志：[暗紫时间] [语义色级别] [暗青固定宽模块] 默认色消息
-下载：绿 spinner + 青 prefix/bar + 固定宽数字 + dim 状态
-校验：黄 spinner/prefix + 绿 bar
-状态：✓绿 · ↓青 · …暗 · !红/暗 · ⚡黄 · 📦白
-完成：成功任务自动清除，最后只留 INFO 或单行摘要
-失败：红色明确文本 + stderr + 非零退出码
-布局：日志在上，任务条居中，聚合状态固定最下
+┌──────────────────────────────────────────────────────────────────┐
+│  品牌    粗体白 Logo + 青色副标题 + 固定英文签名（72 列基准）    │
+│  帮助    绿色标题 · 蓝色命令/选项 · 青色占位符                  │
+│  日志    [暗紫时间] [语义色级别] [暗青固定宽模块] 默认色消息     │
+│  下载    绿 spinner + 青 prefix(14)/bar(28) + 固定宽数字 + dim   │
+│  校验    黄 spinner/prefix(26) + 绿 bar(28)                     │
+│  阶段    青 spinner + 青 prefix(11)/bar(14)，80 列可用           │
+│  状态栏  ✓绿 · ↓青 · …暗 · !红/暗 · ⚡黄 · 📦白（100ms 刷新）  │
+│  完成    成功任务 finish_and_clear()，最后只留 INFO 或单行摘要   │
+│  失败    红色明确文本 + stderr + 非零退出码                      │
+│  布局    日志在上 → 任务条居中 → 聚合状态固定最下                │
+│  降级    NO_COLOR 关色 · 非 TTY 关 Banner · JSON 关动态 UI       │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
-这套样式的重点并不是“多用颜色和图标”，而是让不同输出拥有稳定的位置、宽度和语义。只要保留这种层级，即使替换品牌色、Logo 和业务字段，也能获得相同的专业终端体验。
+这套样式的重点并不是"多用颜色和图标"，而是让不同输出拥有稳定的位置、宽度和语义。只要保留这种层级，即使替换品牌色、Logo 和业务字段，也能获得相同的专业终端体验。
