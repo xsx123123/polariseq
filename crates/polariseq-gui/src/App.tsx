@@ -1548,7 +1548,7 @@ function AboutTab() {
         <blockquote className="cosmic-quote">
           <p><strong>“We are made of star-stuff.”</strong></p>
           <p>
-            We are only borrowing these atoms from the universe, for a brief experience of this world.
+            We are only borrowing these atoms from the universe, for a brief taste of this world.
             We are only borrowing these carbon, hydrogen, and oxygen atoms from the universe for a few decades,
             using them to briefly experience this world once.
             Every atom that makes up our brains and bodies was forged in the nuclear fusion of ancient stars

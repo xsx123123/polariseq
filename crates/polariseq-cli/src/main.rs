@@ -32,7 +32,7 @@ mod http_server;
 mod ui_manager;
 use ui_manager::{Mode, UiManager};
 
-const VERSION: &str = "1.4.2";
+const VERSION: &str = "1.4.3";
 const SCRIPT_NAME: &str = "polariseq";
 
 use clap::builder::styling::{AnsiColor, Effects, Styles};
@@ -47,10 +47,10 @@ const HELP_LOGO: &str = "\n\n\
 \x1b[1;37m    ██║     ╚██████╔╝███████╗██║  ██║██║  ██║██║███████║███████╗╚██████╔╝\x1b[0m\n\
 \x1b[1;37m    ╚═╝      ╚═════╝ ╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝╚═╝╚══════╝╚══════╝ ╚══▀▀═╝\x1b[0m\n\
 \n\
-\x1b[36m                   Sequencing Data Toolkit  │  v1.4.2\x1b[0m\n\
+\x1b[36m                   Sequencing Data Toolkit  │  v1.4.3\x1b[0m\n\
 \n\
 \x1b[36m    We are only borrowing these atoms from the universe, for a brief\x1b[0m\n\
-\x1b[36m                       experience of this world.\x1b[0m";
+\x1b[36m                       taste of this world.\x1b[0m";
 
 const HELP_STYLES: Styles = Styles::styled()
     .header(AnsiColor::Green.on_default().effects(Effects::BOLD))
@@ -1221,7 +1221,7 @@ fn print_banner() {
     println!();
     for line in [
         "We are only borrowing these atoms from the universe, for a brief",
-        "experience of this world.",
+        "taste of this world.",
     ] {
         println!("{}", Color::Cyan.paint(center(line)));
     }
