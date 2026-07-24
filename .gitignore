@@ -13,9 +13,10 @@ Thumbs.db
 .vscode/
 *.iml
 
-# Claude local settings
+# agent local settings
 .claude/
 .claude/
+.qoder
 
 # Build artifacts
 polariseq_mac_arm64
