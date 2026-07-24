@@ -29,6 +29,17 @@ pub fn spinner_style() -> ProgressStyle {
         .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏ ")
 }
 
+pub fn phase_bar_style() -> ProgressStyle {
+    // Keep phase rows compact enough for an 80-column terminal. Unlike the
+    // download bar, conversion and compression do not have a reliable ETA.
+    ProgressStyle::with_template(
+        "{spinner:.cyan} {prefix:<11!.bold.cyan} {bar:14.cyan/bright_black} {percent:>3}% {binary_bytes:>8}/{binary_total_bytes:<8} {wide_msg:.dim}",
+    )
+    .expect("valid phase progress template")
+    .progress_chars("█▉▊▋▌▍▎▏░")
+    .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏ ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -38,5 +49,6 @@ mod tests {
         let _ = transfer_bar_style();
         let _ = verify_bar_style();
         let _ = spinner_style();
+        let _ = phase_bar_style();
     }
 }

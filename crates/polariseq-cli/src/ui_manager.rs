@@ -21,6 +21,7 @@ use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use tokio::task::JoinHandle;
 
 use polariseq_core::observer::{CompletedInfo, DownloadObserver};
+use polariseq_core::progress::phase_bar_style;
 use polariseq_core::progress_store::{ProgressStore, RunStage};
 
 /// Window used for the smoothed aggregate speed on the status bar.
@@ -268,17 +269,6 @@ fn status_bar_style() -> ProgressStyle {
     ProgressStyle::with_template("{spinner:.green} {msg}")
         .expect("valid status bar template")
         .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏ ")
-}
-
-fn phase_bar_style() -> ProgressStyle {
-    // Keep phase rows compact enough for an 80-column terminal. Unlike the
-    // download bar, conversion and compression do not have a reliable ETA.
-    ProgressStyle::with_template(
-        "{spinner:.cyan} {prefix:<11!.bold.cyan} {bar:14.cyan/bright_black} {percent:>3}% {binary_bytes:>8}/{binary_total_bytes:<8} {wide_msg:.dim}",
-    )
-    .expect("valid phase progress template")
-    .progress_chars("█▉▊▋▌▍▎▏░")
-    .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏ ")
 }
 
 /// Colorize one status-bar segment: `icon label` with a fixed ANSI color name.
