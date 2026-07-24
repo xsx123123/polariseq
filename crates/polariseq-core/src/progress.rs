@@ -10,8 +10,13 @@ pub fn transfer_bar_style() -> ProgressStyle {
 }
 
 pub fn verify_bar_style() -> ProgressStyle {
+    // The prefix column is exactly 26 cells wide (`<26!` pads short names
+    // and hard-truncates long ones), so every per-file bar lines up in the
+    // same column regardless of file name length. The hash bars in
+    // `md5.rs` additionally middle-truncate names so head and tail stay
+    // visible within the budget.
     ProgressStyle::with_template(
-        "{spinner:.yellow} {prefix:<14.bold.yellow} {bar:28.green/bright_black} {percent:>3}% {binary_bytes:>9}/{binary_total_bytes:<9} {msg:.dim}",
+        "{spinner:.yellow} {prefix:<26!.yellow.dim} {bar:28.green/bright_black} {percent:>3}% {binary_bytes:>9}/{binary_total_bytes:<9} {msg:.dim}",
     )
     .expect("valid verify progress template")
     .progress_chars("█▉▊▋▌▍▎▏░")

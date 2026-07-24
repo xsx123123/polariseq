@@ -41,6 +41,12 @@ pub fn compute_md5_with_progress(path: &Path, progress: Option<&ProgressBar>) ->
     Ok(format!("{:x}", ctx.compute()))
 }
 
+/// Width of the fixed-width file name column drawn by [`new_hash_bar`].
+///
+/// Matches the `{prefix:<26!...}` placeholder in `verify_bar_style`: every
+/// per-file bar starts at the same column no matter how long the name is.
+const HASH_PREFIX_WIDTH: usize = 26;
+
 /// A per-file hashing bar on the shared MultiProgress; matches the style used
 /// for post-download integrity checks in `aws_s3.rs`.
 fn new_hash_bar(mp: &MultiProgress, file: &Path, verb: &str) -> ProgressBar {
@@ -51,10 +57,33 @@ fn new_hash_bar(mp: &MultiProgress, file: &Path, verb: &str) -> ProgressBar {
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| file.display().to_string());
-    pb.set_prefix(name);
+    pb.set_prefix(truncated_middle(&name, HASH_PREFIX_WIDTH));
     pb.set_message(verb.to_string());
     pb.enable_steady_tick(std::time::Duration::from_millis(100));
     pb
+}
+
+/// Truncate `s` to at most `width` columns by keeping a head and a tail
+/// joined with an ellipsis, e.g. `Zea_mays.Zm-B73-…3.chr.gff3.gz`.
+///
+/// Middle truncation (rather than a plain head cut) keeps both the species
+/// prefix and the file-type suffix visible, so files of the same species
+/// like `…63.chr.gff3.gz` / `…63.gff3.gz` / `….dna.toplevel.fa.gz` remain
+/// distinguishable in the fixed-width column. Strings that already fit are
+/// returned unchanged.
+///
+/// Genome file names are ASCII, so char count equals terminal column count
+/// (the inserted `…` is also one column wide).
+fn truncated_middle(s: &str, width: usize) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    if width < 5 || chars.len() <= width {
+        return s.to_string();
+    }
+    let tail_len = width / 2;
+    let head_len = width - 1 - tail_len;
+    let head: String = chars[..head_len].iter().collect();
+    let tail: String = chars[chars.len() - tail_len..].iter().collect();
+    format!("{head}…{tail}")
 }
 
 /// Parse an md5sum-compatible manifest.
@@ -373,6 +402,28 @@ pub async fn verify_md5_manifest(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn truncated_middle_keeps_short_names_and_abbreviates_long_ones() {
+        // Short names pass through unchanged (the bar template pads them).
+        assert_eq!(truncated_middle("data.fa", HASH_PREFIX_WIDTH), "data.fa");
+        assert_eq!(
+            truncated_middle(&"x".repeat(HASH_PREFIX_WIDTH), HASH_PREFIX_WIDTH),
+            "x".repeat(HASH_PREFIX_WIDTH)
+        );
+
+        let long = "Zea_mays.Zm-B73-REFERENCE-NAM-5.0.63.chr.gff3.gz";
+        let t = truncated_middle(long, HASH_PREFIX_WIDTH);
+        assert_eq!(t.chars().count(), HASH_PREFIX_WIDTH);
+        assert!(t.starts_with("Zea_mays."), "{t}");
+        assert!(t.ends_with("chr.gff3.gz"), "{t}");
+        assert!(t.contains('…'), "{t}");
+
+        // Same-species files sharing a long prefix must stay distinguishable.
+        let sibling =
+            truncated_middle("Zea_mays.Zm-B73-REFERENCE-NAM-5.0.63.gff3.gz", HASH_PREFIX_WIDTH);
+        assert_ne!(t, sibling, "chr.gff3 and gff3 must not look identical");
+    }
 
     #[test]
     fn md5_log_names_are_detected() {
