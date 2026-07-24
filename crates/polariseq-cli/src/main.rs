@@ -1655,11 +1655,7 @@ async fn download_with_aws(
                         )
                     })?;
 
-<<<<<<< HEAD
                 let estimated_fastq_size = sra_size.saturating_mul(3).max(1);
-=======
-                let estimated_fastq_size = sra_size.saturating_mul(3);
->>>>>>> 1aa2add3bca6f432c408ae5d7684c82e6c801e73
                 let child = Command::new(&fasterq_dump)
                     .arg("--split-3")
                     .arg("-e")
@@ -1681,16 +1677,8 @@ async fn download_with_aws(
                 let fasterq_tmp_dir_mon = fasterq_tmp_dir.clone();
                 let run_id_mon = run_id.clone();
                 let store_mon = progress_store.clone();
-<<<<<<< HEAD
                 let conversion_counter = ui.register(&run_id, estimated_fastq_size);
                 let conversion_counter_mon = conversion_counter.clone();
-                let conversion_pb = mp.insert_from_back(1, ProgressBar::new(estimated_fastq_size));
-                conversion_pb.set_style(polariseq_core::progress::transfer_bar_style());
-                conversion_pb.set_prefix(run_id.clone());
-                conversion_pb.set_message("Converting · fasterq-dump");
-                conversion_pb.enable_steady_tick(Duration::from_millis(100));
-=======
->>>>>>> 1aa2add3bca6f432c408ae5d7684c82e6c801e73
                 let conversion_pb_mon = conversion_pb.clone();
                 let extract_monitor = tokio::spawn(async move {
                     let mut interval = tokio::time::interval(Duration::from_millis(500));
@@ -1715,23 +1703,17 @@ async fn download_with_aws(
                             rp.extraction.percent = rp.extraction.percent.min(99.0);
                             rp.recalculate_overall();
                         }
-                        conversion_pb_mon
-                            .set_position(total_size.min(estimated_fastq_size.saturating_sub(1)));
                     }
                 });
 
                 let output_result = child.wait_with_output().await;
                 extract_monitor.abort();
-<<<<<<< HEAD
                 let _ = extract_monitor.await;
                 conversion_counter.store(estimated_fastq_size, Ordering::Relaxed);
                 conversion_pb.set_position(estimated_fastq_size);
                 conversion_pb.finish_and_clear();
                 ui.unregister(&run_id);
                 let output = output_result?;
-=======
-                conversion_pb.finish_and_clear();
->>>>>>> 1aa2add3bca6f432c408ae5d7684c82e6c801e73
                 let fqdump_stderr = String::from_utf8_lossy(&output.stderr);
 
                 if !output.status.success() {

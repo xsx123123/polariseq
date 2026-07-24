@@ -146,8 +146,10 @@ fn collect_files_recursive(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
 /// - If `target` is a directory, all non-hidden regular files under it are
 ///   hashed recursively.
 ///
-/// The manifest uses base names (`path.file_name()`) so that it can later be
-/// verified from any directory containing those files.
+/// When `target` is a directory, manifest entries use paths **relative to
+/// `target`** (e.g. `subdir/file.fa.gz`), so the manifest can be verified from
+/// any location with `verify --dir <target>` — including files that live in
+/// subdirectories. A single-file `target` is recorded by its base name.
 ///
 /// When `progress` is given, each file gets its own hashing bar on the shared
 /// `MultiProgress`.
@@ -157,10 +159,10 @@ pub async fn generate_md5_manifest(
     threads: usize,
     progress: Option<Arc<MultiProgress>>,
 ) -> Result<()> {
-    let mut files = if target.is_file() {
-        vec![target.to_path_buf()]
+    let (mut files, base) = if target.is_file() {
+        (vec![target.to_path_buf()], None)
     } else if target.is_dir() {
-        collect_files(target)?
+        (collect_files(target)?, Some(target))
     } else {
         return Err(anyhow!("Target {} is neither a file nor a directory", target.display()));
     };
@@ -219,16 +221,33 @@ pub async fn generate_md5_manifest(
     let mut manifest = File::create(output)
         .with_context(|| format!("Failed to create {}", output.display()))?;
     for (file, md5) in &results {
-        let filename = file
-            .file_name()
-            .ok_or_else(|| anyhow!("Path has no file name: {}", file.display()))?
-            .to_string_lossy();
-        writeln!(manifest, "{}  {}", md5, filename)
+        writeln!(manifest, "{}  {}", md5, manifest_entry_name(file, base))
             .with_context(|| format!("Failed to write to {}", output.display()))?;
     }
 
     info!("MD5 manifest written: {}", output.display());
     Ok(())
+}
+
+/// Name recorded in the manifest for `file`.
+///
+/// With a `base` directory (directory targets), the path relative to `base`
+/// is used so nested files stay locatable at verify time. Without one (single
+/// file target), or if stripping the prefix somehow fails, the base name is
+/// used.
+fn manifest_entry_name(file: &Path, base: Option<&Path>) -> String {
+    if let Some(base) = base {
+        if let Ok(rel) = file.strip_prefix(base) {
+            if rel.as_os_str().is_empty() {
+                // Defensive: should not happen — `file` is never `base` itself.
+                return file.display().to_string();
+            }
+            return rel.to_string_lossy().into_owned();
+        }
+    }
+    file.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| file.display().to_string())
 }
 
 /// Verify files in `root_dir` against an md5sum-compatible manifest.
@@ -401,6 +420,56 @@ mod tests {
         assert!(manifest.contains("data.fa"), "manifest: {manifest}");
         assert!(!manifest.contains("md5.txt"), "manifest: {manifest}");
         assert!(!manifest.contains("polariseq_md5"), "manifest: {manifest}");
+    }
+
+    #[tokio::test]
+    async fn generate_records_paths_relative_to_target_and_verify_finds_nested_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("Arabidopsis_thaliana.TAIR10");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::write(sub.join("dna.toplevel.fa.gz"), b"acgt").unwrap();
+        std::fs::write(dir.path().join("top.txt"), b"top").unwrap();
+        let output = dir.path().join("md5.txt");
+
+        generate_md5_manifest(dir.path(), &output, 2, None)
+            .await
+            .unwrap();
+
+        let manifest = std::fs::read_to_string(&output).unwrap();
+        // Nested files must keep their subdirectory in the manifest, or a
+        // later `verify --dir <target>` can never locate them.
+        let rel = sub
+            .join("dna.toplevel.fa.gz")
+            .strip_prefix(dir.path())
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert!(manifest.contains(&rel), "manifest: {manifest}");
+        assert!(manifest.contains("top.txt"), "manifest: {manifest}");
+        assert!(
+            !manifest.contains(&dir.path().display().to_string()),
+            "manifest must not contain absolute paths: {manifest}"
+        );
+
+        // Round-trip: verify from the target directory must find both files.
+        let (passed, failed) = verify_md5_manifest(&output, dir.path(), 2, None)
+            .await
+            .unwrap();
+        assert_eq!((passed, failed), (2, 0));
+    }
+
+    #[tokio::test]
+    async fn generate_single_file_uses_base_name() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("data.fa"), b"acgt").unwrap();
+        let output = dir.path().join("md5.txt");
+
+        generate_md5_manifest(&dir.path().join("data.fa"), &output, 2, None)
+            .await
+            .unwrap();
+
+        let manifest = std::fs::read_to_string(&output).unwrap();
+        assert!(manifest.ends_with("  data.fa\n"), "manifest: {manifest}");
     }
 
     #[tokio::test]

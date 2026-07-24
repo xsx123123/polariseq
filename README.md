@@ -555,7 +555,7 @@ The `md5` subcommand generates and verifies md5sum-compatible manifests for any 
 | `-d`, `--dir` | `verify` only: directory containing the listed files | `.` |
 | `-t`, `--threads` | Number of files hashed in parallel | `4` |
 
-Manifest lines use the standard `<md5>  <filename>` format, so they can also be checked with `md5sum -c md5.txt`. `md5 verify` logs a per-file ✅/❌ result, prints a pass/fail summary, and exits non-zero if any file is missing or mismatched.
+Manifest lines use the standard `<md5>  <filename>` format, so they can also be checked with `md5sum -c md5.txt`. When hashing a directory, filenames are recorded **relative to the input directory** (e.g. `species_dir/genome.fa.gz`), so files nested in subdirectories are found again at verification time — run `md5 verify -i md5.txt -d <the same input directory>`. A single-file input is recorded by its base name. `md5 verify` logs a per-file ✅/❌ result, prints a pass/fail summary, and exits non-zero if any file is missing or mismatched.
 
 The subcommand writes its own log as `polariseq_md5_<timestamp>.log` next to the data. Both `generate` and `verify` automatically skip these `polariseq_md5_*.log` files, and `generate` never includes the output manifest itself, so re-running the command in the same directory stays idempotent.
 
