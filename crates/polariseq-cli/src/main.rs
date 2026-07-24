@@ -1442,6 +1442,51 @@ pub fn create_script(output_path: &Path, fastq_id: &str, command: &str) -> Resul
     Ok(script_path)
 }
 
+fn directory_size(path: &Path) -> u64 {
+    let mut total = 0u64;
+    let mut pending = vec![path.to_path_buf()];
+
+    while let Some(dir) = pending.pop() {
+        let Ok(entries) = fs::read_dir(dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(metadata) = entry.metadata() else {
+                continue;
+            };
+            if metadata.is_dir() {
+                pending.push(path);
+            } else if metadata.is_file() {
+                total = total.saturating_add(metadata.len());
+            }
+        }
+    }
+
+    total
+}
+
+fn conversion_work_bytes(output_dir: &Path, temp_dir: &Path, run_id: &str) -> u64 {
+    let fastq_bytes = [
+        format!("{}.fastq", run_id),
+        format!("{}_1.fastq", run_id),
+        format!("{}_2.fastq", run_id),
+    ]
+    .iter()
+    .filter_map(|name| fs::metadata(output_dir.join(name)).ok())
+    .map(|metadata| metadata.len())
+    .sum::<u64>();
+
+    fastq_bytes.max(directory_size(temp_dir))
+}
+
+fn visible_conversion_bytes(observed: u64, total: u64) -> u64 {
+    if total == 0 {
+        return 0;
+    }
+    observed.min(total.saturating_sub(1))
+}
+
 // AWS Entry (Keep original logic)
 async fn download_with_aws(
     records: &[ProcessedRecord],
@@ -1535,7 +1580,7 @@ async fn download_with_aws(
                     output_dir.clone(),
                     chunk_size,
                     max_workers,
-                    Some(mp),
+                    Some(mp.clone()),
                     Some(progress_store.clone()),
                 )
                 .await?
@@ -1612,7 +1657,7 @@ async fn download_with_aws(
                         )
                     })?;
 
-                let estimated_fastq_size = sra_size * 3;
+                let estimated_fastq_size = sra_size.saturating_mul(3).max(1);
                 let child = Command::new(&fasterq_dump)
                     .arg("--split-3")
                     .arg("-e")
@@ -1629,34 +1674,51 @@ async fn download_with_aws(
                     .spawn()?;
 
                 let output_dir_mon = output_dir.clone();
+                let fasterq_tmp_dir_mon = fasterq_tmp_dir.clone();
                 let run_id_mon = run_id.clone();
                 let store_mon = progress_store.clone();
+                let conversion_counter = ui.register(&run_id, estimated_fastq_size);
+                let conversion_counter_mon = conversion_counter.clone();
+                let conversion_pb = mp.insert_from_back(1, ProgressBar::new(estimated_fastq_size));
+                conversion_pb.set_style(polariseq_core::progress::transfer_bar_style());
+                conversion_pb.set_prefix(run_id.clone());
+                conversion_pb.set_message("Converting · fasterq-dump");
+                conversion_pb.enable_steady_tick(Duration::from_millis(100));
+                let conversion_pb_mon = conversion_pb.clone();
                 let extract_monitor = tokio::spawn(async move {
                     let mut interval = tokio::time::interval(Duration::from_millis(500));
+                    let mut peak_bytes = 0u64;
                     loop {
                         interval.tick().await;
-                        let mut total_size = 0u64;
-                        for name in &[
-                            format!("{}.fastq", run_id_mon),
-                            format!("{}_1.fastq", run_id_mon),
-                            format!("{}_2.fastq", run_id_mon),
-                        ] {
-                            let path = output_dir_mon.join(name);
-                            if let Ok(meta) = tokio::fs::metadata(&path).await {
-                                total_size += meta.len();
-                            }
-                        }
+                        let output_dir_scan = output_dir_mon.clone();
+                        let temp_dir_scan = fasterq_tmp_dir_mon.clone();
+                        let run_id_scan = run_id_mon.clone();
+                        let observed = tokio::task::spawn_blocking(move || {
+                            conversion_work_bytes(&output_dir_scan, &temp_dir_scan, &run_id_scan)
+                        })
+                        .await
+                        .unwrap_or(peak_bytes);
+                        peak_bytes = peak_bytes.max(observed);
+                        let visible = visible_conversion_bytes(peak_bytes, estimated_fastq_size);
+                        conversion_counter_mon.store(visible, Ordering::Relaxed);
+                        conversion_pb_mon.set_position(visible);
                         let mut map = store_mon.write().await;
                         if let Some(rp) = map.get_mut(&run_id_mon) {
-                            rp.extraction.update(total_size, estimated_fastq_size);
+                            rp.extraction.update(visible, estimated_fastq_size);
                             rp.extraction.percent = rp.extraction.percent.min(99.0);
                             rp.recalculate_overall();
                         }
                     }
                 });
 
-                let output = child.wait_with_output().await?;
+                let output_result = child.wait_with_output().await;
                 extract_monitor.abort();
+                let _ = extract_monitor.await;
+                conversion_counter.store(estimated_fastq_size, Ordering::Relaxed);
+                conversion_pb.set_position(estimated_fastq_size);
+                conversion_pb.finish_and_clear();
+                ui.unregister(&run_id);
+                let output = output_result?;
                 let fqdump_stderr = String::from_utf8_lossy(&output.stderr);
 
                 if !output.status.success() {
@@ -1852,6 +1914,7 @@ async fn download_with_ftp(
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
     use tracing_subscriber::layer::{Context, SubscriberExt};
     use tracing_subscriber::{Layer, Registry};
 
@@ -1878,5 +1941,43 @@ mod tests {
         });
 
         assert_eq!(seen.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn conversion_progress_observes_fasterq_temp_files() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time after epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "polariseq-conversion-progress-{}-{unique}",
+            std::process::id()
+        ));
+        let output_dir = root.join("output");
+        let temp_dir = root.join("temp").join("nested");
+        fs::create_dir_all(&output_dir).expect("create output directory");
+        fs::create_dir_all(&temp_dir).expect("create temporary directory");
+        fs::write(temp_dir.join("work.tmp"), vec![0u8; 4096]).expect("write temp work file");
+
+        assert_eq!(
+            conversion_work_bytes(&output_dir, &root.join("temp"), "SRRTEST"),
+            4096
+        );
+
+        fs::write(output_dir.join("SRRTEST.fastq"), vec![0u8; 8192]).expect("write fastq output");
+        assert_eq!(
+            conversion_work_bytes(&output_dir, &root.join("temp"), "SRRTEST"),
+            8192
+        );
+
+        fs::remove_dir_all(root).expect("remove test directory");
+    }
+
+    #[test]
+    fn conversion_progress_waits_for_process_exit_before_reaching_total() {
+        assert_eq!(visible_conversion_bytes(20, 100), 20);
+        assert_eq!(visible_conversion_bytes(100, 100), 99);
+        assert_eq!(visible_conversion_bytes(200, 100), 99);
+        assert_eq!(visible_conversion_bytes(10, 0), 0);
     }
 }
