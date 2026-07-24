@@ -18,7 +18,8 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use tracing::info;
+use std::sync::Arc;
+use tracing::{debug, info};
 
 // Configuration
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -402,21 +403,30 @@ pub fn compress_fastq_files(
         format!("{}_1.fastq", run_id),
         format!("{}_2.fastq", run_id),
     ];
+    let mut input_files = Vec::new();
 
-    for name in &candidates {
-        let input_path = output_dir.join(name);
-        if !input_path.exists() || input_path.metadata()?.len() == 0 {
+    for name in candidates {
+        let input_path = output_dir.join(&name);
+        if !input_path.exists() {
             continue;
         }
+        let input_size = input_path.metadata()?.len();
+        if input_size > 0 {
+            input_files.push((name, input_path, input_size));
+        }
+    }
 
-        let output_path = output_dir.join(format!("{}.gz", name));
-        info!(
-            "Compressing {} -> {}",
+    let total_input_size = input_files.iter().map(|(_, _, size)| *size).sum::<u64>();
+    let mut completed_input_size = 0u64;
+
+    for (name, input_path, input_size) in input_files {
+        let output_path = output_dir.join(format!("{name}.gz"));
+        debug!(target: "download_detail",
+            "📦 Compressing {} -> {}",
             input_path.display(),
             output_path.display()
         );
 
-        let input_size = input_path.metadata()?.len();
         let input = File::open(&input_path)
             .with_context(|| format!("Failed to open {}", input_path.display()))?;
         let input = BufReader::new(input);
@@ -428,7 +438,13 @@ pub fn compress_fastq_files(
             .from_writer(output);
 
         if let Some(cb) = &progress_cb {
-            let mut counting = CountingReader::new(input, input_size, cb.clone());
+            let cb = cb.clone();
+            let offset = completed_input_size;
+            let aggregate_cb: progress_store::CompressionProgressCallback =
+                Arc::new(move |bytes_read, _| {
+                    cb(offset.saturating_add(bytes_read), total_input_size);
+                });
+            let mut counting = CountingReader::new(input, input_size, aggregate_cb);
             std::io::copy(&mut counting, &mut writer)
                 .with_context(|| format!("Failed to compress {}", input_path.display()))?;
         } else {
@@ -444,6 +460,7 @@ pub fn compress_fastq_files(
             .with_context(|| format!("Failed to remove original {}", input_path.display()))?;
 
         compressed.push(output_path);
+        completed_input_size = completed_input_size.saturating_add(input_size);
     }
 
     Ok(compressed)
@@ -530,6 +547,7 @@ fn check_executable(path: &Path, name: &str) -> Result<()> {
 mod tests {
     use super::*;
     use std::io::Write;
+    use std::sync::Mutex;
 
     #[test]
     fn test_compress_fastq_files() {
@@ -549,7 +567,13 @@ mod tests {
         writeln!(f2, "+").unwrap();
         writeln!(f2, "!!!!!!!!").unwrap();
 
-        let compressed = compress_fastq_files(tmp.path(), run_id, 2, None).unwrap();
+        let expected_total = fq1.metadata().unwrap().len() + fq2.metadata().unwrap().len();
+        let samples = Arc::new(Mutex::new(Vec::new()));
+        let samples_cb = samples.clone();
+        let progress_cb: progress_store::CompressionProgressCallback =
+            Arc::new(move |done, total| samples_cb.lock().unwrap().push((done, total)));
+
+        let compressed = compress_fastq_files(tmp.path(), run_id, 2, Some(progress_cb)).unwrap();
         assert_eq!(compressed.len(), 2);
 
         assert!(tmp.path().join(format!("{}_1.fastq.gz", run_id)).exists());
@@ -564,5 +588,11 @@ mod tests {
         std::io::Read::read_to_string(&mut decoder, &mut contents).unwrap();
         assert!(contents.contains("@read1/1"));
         assert!(contents.contains("ACGTACGT"));
+
+        let samples = samples.lock().unwrap();
+        assert!(!samples.is_empty());
+        assert!(samples.windows(2).all(|pair| pair[0].0 <= pair[1].0));
+        assert!(samples.iter().all(|(_, total)| *total == expected_total));
+        assert_eq!(samples.last(), Some(&(expected_total, expected_total)));
     }
 }

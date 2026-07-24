@@ -32,6 +32,9 @@
 | `EBIDOWNLOAD_PROGRESS_KEY` | `POLARISEQ_PROGRESS_KEY` |
 | github.com/xsx123123/EBIDownload | github.com/xsx123123/polariseq |
 
+### Changed
+- **Cleaner AWS Pipeline Display**: Replaced repeated download, conversion, and compression step logs with compact in-place phase progress bars; per-run details remain available at debug level without cluttering the default terminal view.
+
 ## [1.4.1] - 2026-07-16
 
 ### Added

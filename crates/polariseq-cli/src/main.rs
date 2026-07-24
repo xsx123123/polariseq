@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::process::Command;
 use tokio::sync::Semaphore;
-use tracing::{error, info, warn, Event, Subscriber};
+use tracing::{debug, error, info, warn, Event, Subscriber};
 use tracing_subscriber::fmt::format::{FormatEvent, FormatFields, Writer};
 use tracing_subscriber::fmt::FmtContext;
 use tracing_subscriber::registry::LookupSpan;
@@ -1523,7 +1523,7 @@ async fn download_with_aws(
             let metadata = polariseq_core::aws_s3::SraUtils::get_metadata(&run_id, None).await?;
             let sra_filename = run_id.clone();
             let sra_size = metadata.as_ref().map(|m| m.size).unwrap_or(0);
-            info!(target: "download_detail", "[{}] Step 1: Downloading via AWS S3...", run_id);
+            debug!(target: "download_detail", "[{}] Downloading via AWS S3", run_id);
 
             if let Some(sra_metadata) = metadata {
                 // Share the per-file byte counter with the status bar so the
@@ -1582,10 +1582,8 @@ async fn download_with_aws(
             let mut fqdump_error: Option<String> = None;
 
             if fq_exists {
-                info!(target: "download_detail", "[{}] FASTQ files already exist, skipping conversion.", run_id);
+                debug!(target: "download_detail", "[{}] FASTQ files already exist; skipping conversion", run_id);
             } else {
-                info!(target: "download_detail", "[{}] Step 2: Converting (fasterq-dump)...", run_id);
-
                 let fasterq_tmp_dir = output_dir.join(".fasterq_tmp").join(&run_id);
                 tokio::fs::create_dir_all(&fasterq_tmp_dir)
                     .await
@@ -1612,7 +1610,7 @@ async fn download_with_aws(
                         )
                     })?;
 
-                let estimated_fastq_size = sra_size * 3;
+                let estimated_fastq_size = sra_size.saturating_mul(3);
                 let child = Command::new(&fasterq_dump)
                     .arg("--split-3")
                     .arg("-e")
@@ -1628,9 +1626,12 @@ async fn download_with_aws(
                     .stderr(Stdio::piped())
                     .spawn()?;
 
+                let conversion_pb =
+                    ui.phase_bar(&run_id, "Converting · fasterq-dump", estimated_fastq_size);
                 let output_dir_mon = output_dir.clone();
                 let run_id_mon = run_id.clone();
                 let store_mon = progress_store.clone();
+                let conversion_pb_mon = conversion_pb.clone();
                 let extract_monitor = tokio::spawn(async move {
                     let mut interval = tokio::time::interval(Duration::from_millis(500));
                     loop {
@@ -1652,11 +1653,14 @@ async fn download_with_aws(
                             rp.extraction.percent = rp.extraction.percent.min(99.0);
                             rp.recalculate_overall();
                         }
+                        conversion_pb_mon
+                            .set_position(total_size.min(estimated_fastq_size.saturating_sub(1)));
                     }
                 });
 
                 let output = child.wait_with_output().await?;
                 extract_monitor.abort();
+                conversion_pb.finish_and_clear();
                 let fqdump_stderr = String::from_utf8_lossy(&output.stderr);
 
                 if !output.status.success() {
@@ -1687,8 +1691,6 @@ async fn download_with_aws(
                     && fq_single.metadata().map(|m| m.len() > 0).unwrap_or(false));
 
             if fq_exists_after {
-                info!(target: "download_detail", "[{}] Step 3: Compressing...", run_id);
-
                 let mut fastq_total_size = 0u64;
                 for name in &[
                     format!("{}.fastq", run_id),
@@ -1701,6 +1703,8 @@ async fn download_with_aws(
                     }
                 }
 
+                let compression_pb = ui.phase_bar(&run_id, "Compressing · gzip", fastq_total_size);
+
                 let compression_bytes = Arc::new(AtomicU64::new(0));
                 let cb_bytes = compression_bytes.clone();
                 let progress_cb: polariseq_core::progress_store::CompressionProgressCallback =
@@ -1712,6 +1716,7 @@ async fn download_with_aws(
                 let comp_run_id = run_id.clone();
                 let comp_bytes_mon = compression_bytes.clone();
                 let comp_total = fastq_total_size;
+                let compression_pb_mon = compression_pb.clone();
                 let comp_monitor = tokio::spawn(async move {
                     let mut interval = tokio::time::interval(Duration::from_millis(200));
                     loop {
@@ -1723,12 +1728,13 @@ async fn download_with_aws(
                             rp.compression.percent = rp.compression.percent.min(99.0);
                             rp.recalculate_overall();
                         }
+                        compression_pb_mon.set_position(done.min(comp_total.saturating_sub(1)));
                     }
                 });
 
                 let output_dir_compress = output_dir.clone();
                 let run_id_compress = run_id.clone();
-                tokio::task::spawn_blocking(move || {
+                let compression_result = tokio::task::spawn_blocking(move || {
                     polariseq_core::compress_fastq_files(
                         &output_dir_compress,
                         &run_id_compress,
@@ -1736,11 +1742,13 @@ async fn download_with_aws(
                         Some(progress_cb),
                     )
                 })
-                .await
-                .context("Compression task panicked")?
-                .context("Compression failed")?;
+                .await;
 
                 comp_monitor.abort();
+                compression_pb.finish_and_clear();
+                compression_result
+                    .context("Compression task panicked")?
+                    .context("Compression failed")?;
 
                 {
                     let mut map = progress_store.write().await;

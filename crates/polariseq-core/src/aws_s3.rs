@@ -18,7 +18,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::io::AsyncReadExt;
 use tokio::sync::{mpsc, Mutex};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 // ============================
 // 1. Data Structures
@@ -470,7 +470,7 @@ impl ResumableDownloader {
             self.metadata.md5.as_deref().unwrap_or("N/A"),
             self.filepath.display()
         );
-        info!(target: "download_detail", "{}", details);
+        debug!(target: "download_detail", "{}", details);
 
         if tasks.is_empty() {
             let msg = format!(
@@ -478,7 +478,7 @@ impl ResumableDownloader {
                 self.run_id
             );
             pb.println(&msg);
-            info!(target: "download_detail", "{}", msg);
+            debug!(target: "download_detail", "{}", msg);
             pb.finish_and_clear();
             return self
                 .verify_integrity(start_time.elapsed().as_secs_f64(), true)
@@ -711,7 +711,7 @@ impl ResumableDownloader {
                 self.run_id,
                 start_time.elapsed().as_secs_f64()
             );
-            info!(target: "download_detail", "{}", msg);
+            debug!(target: "download_detail", "{}", msg);
 
             let _ = std::fs::remove_file(&self.meta_file);
             Ok(true)
