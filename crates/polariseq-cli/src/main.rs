@@ -8,11 +8,11 @@ use regex::Regex;
 
 use nu_ansi_term::Color;
 use std::fs::{self, File};
-use std::io::Write;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{ExitCode, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::process::Command;
 use tokio::sync::Semaphore;
@@ -722,7 +722,7 @@ async fn main() -> ExitCode {
 
     print_banner();
 
-    if let Err(e) = setup_logging(
+    let deferred_log = match setup_logging(
         &output_dir,
         &cli.log_level,
         &cli.log_format,
@@ -733,10 +733,14 @@ async fn main() -> ExitCode {
             Commands::Md5(_) => Some("md5"),
             Commands::PublicData(_) | Commands::Validate(_) | Commands::Upload(_) | Commands::Deps(_) => None,
         },
+        matches!(&cli.command, Commands::Md5(_)),
     ) {
-        eprintln!("Failed to setup logging: {}", e);
-        return ExitCode::FAILURE;
-    }
+        Ok(deferred_log) => deferred_log,
+        Err(e) => {
+            eprintln!("Failed to setup logging: {}", e);
+            return ExitCode::FAILURE;
+        }
+    };
 
     // Pre-validate YAML config for commands that require it — fail fast
     // before spending time on network connectivity checks.
@@ -782,9 +786,22 @@ async fn main() -> ExitCode {
 
     if let Err(e) = result {
         tracing::error!("Application failed: {:?}", e);
-        eprintln!(
-            "\nAn error occurred. Please check the log file for detailed error information."
-        );
+        if let Some(deferred_log) = deferred_log {
+            match deferred_log.persist() {
+                Ok(path) => eprintln!(
+                    "\nAn error occurred. Detailed log saved to {}",
+                    path.display()
+                ),
+                Err(log_error) => eprintln!(
+                    "\nAn error occurred, and the log could not be saved: {}",
+                    log_error
+                ),
+            }
+        } else {
+            eprintln!(
+                "\nAn error occurred. Please check the log file for detailed error information."
+            );
+        }
         return ExitCode::FAILURE;
     }
 
@@ -1248,12 +1265,72 @@ fn build_stdout_filter(log_level: &str, env_filter: Option<EnvFilter>) -> EnvFil
     env_filter.unwrap_or_else(|| EnvFilter::new(log_level))
 }
 
+#[derive(Clone)]
+enum LogWriter {
+    File(Arc<Mutex<File>>),
+    Buffer(Arc<Mutex<Vec<u8>>>),
+}
+
+impl Write for LogWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        match self {
+            Self::File(file) => file
+                .lock()
+                .map_err(|_| io::Error::other("log file lock poisoned"))?
+                .write(bytes),
+            Self::Buffer(buffer) => buffer
+                .lock()
+                .map_err(|_| io::Error::other("log buffer lock poisoned"))?
+                .write(bytes),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match self {
+            Self::File(file) => file
+                .lock()
+                .map_err(|_| io::Error::other("log file lock poisoned"))?
+                .flush(),
+            Self::Buffer(buffer) => buffer
+                .lock()
+                .map_err(|_| io::Error::other("log buffer lock poisoned"))?
+                .flush(),
+        }
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogWriter {
+    type Writer = LogWriter;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+struct DeferredLog {
+    path: PathBuf,
+    buffer: Arc<Mutex<Vec<u8>>>,
+}
+
+impl DeferredLog {
+    fn persist(self) -> Result<PathBuf> {
+        let bytes = self
+            .buffer
+            .lock()
+            .map_err(|_| anyhow!("log buffer lock poisoned"))?;
+        fs::write(&self.path, bytes.as_slice())
+            .with_context(|| format!("Failed to write {}", self.path.display()))?;
+        Ok(self.path)
+    }
+}
+
 fn setup_logging(
     output_dir: &Path,
     log_level: &str,
     format: &LogFormat,
     tag: Option<&str>,
-) -> Result<()> {
+    defer_file_creation: bool,
+) -> Result<Option<DeferredLog>> {
     use tracing_subscriber::{layer::SubscriberExt, Layer};
     let timestamp = Local::now().format("%Y-%m-%d_%H-%M-%S");
     // `tag` marks the log producer: the accession for downloads, the
@@ -1264,11 +1341,25 @@ fn setup_logging(
         format!("{}_{}.log", SCRIPT_NAME, timestamp)
     };
     let log_path = output_dir.join(&log_name);
-    let file = File::create(&log_path)?;
+    let (log_writer, deferred_log) = if defer_file_creation {
+        let buffer = Arc::new(Mutex::new(Vec::new()));
+        (
+            LogWriter::Buffer(buffer.clone()),
+            Some(DeferredLog {
+                path: log_path.clone(),
+                buffer,
+            }),
+        )
+    } else {
+        (
+            LogWriter::File(Arc::new(Mutex::new(File::create(&log_path)?))),
+            None,
+        )
+    };
 
     // File layer always uses simple text for readability
     let file_layer = fmt::layer()
-        .with_writer(file)
+        .with_writer(log_writer)
         .with_ansi(false)
         .with_target(true)
         .with_thread_ids(true)
@@ -1313,8 +1404,12 @@ fn setup_logging(
         }
     }
 
-    info!("Log file created: {}", log_path.display());
-    Ok(())
+    if defer_file_creation {
+        debug!("Log output buffered until an error occurs");
+    } else {
+        info!("Log file created: {}", log_path.display());
+    }
+    Ok(deferred_log)
 }
 
 fn apply_filters(records: Vec<EnaRecord>, filters: &RegexFilters) -> Result<Vec<EnaRecord>> {
@@ -1940,6 +2035,40 @@ mod tests {
         });
 
         assert_eq!(seen.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn deferred_log_is_created_only_when_persisted() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time after epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "polariseq-deferred-log-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).expect("create deferred log directory");
+        let path = root.join("polariseq_md5_test.log");
+        let buffer = Arc::new(Mutex::new(Vec::new()));
+        let mut writer = LogWriter::Buffer(buffer.clone());
+
+        writeln!(writer, "md5 command failed").expect("write buffered log");
+        assert!(!path.exists());
+
+        let persisted = DeferredLog {
+            path: path.clone(),
+            buffer,
+        }
+        .persist()
+        .expect("persist deferred log");
+
+        assert_eq!(persisted, path);
+        assert_eq!(
+            fs::read_to_string(&persisted).expect("read persisted log"),
+            "md5 command failed\n"
+        );
+
+        fs::remove_dir_all(root).expect("remove deferred log directory");
     }
 
     #[test]
