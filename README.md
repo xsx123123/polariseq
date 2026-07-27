@@ -418,7 +418,7 @@ A circular **theme toggle button** in the top-right corner of the header switche
 | `-h`  | `--help`         | Print help information                           |              |
 | `-V`  | `--version`      | Print version information                        |              |
 
-**Note**: The `-A` and `-T` options are typically mutually exclusive and are used to specify the data source to download.
+**Note**: Exactly one of `-A` (`--accession`) or `-T` (`--tsv`) is required; the two options are mutually exclusive.
 
 #### b. Public Reference Data from S3
 

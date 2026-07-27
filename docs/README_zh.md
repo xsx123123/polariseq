@@ -223,7 +223,7 @@ Usage: polariseq [OPTIONS] <COMMAND>
 
 **上传子命令参数** (`polariseq upload`)：详见 [第 6 节](#6-通过-aws-s3-上传数据至-ncbi-sra)。
 
-**注意**: `-A` 和 `-T` 选项通常互斥，用于指定要下载的数据源。
+**注意**：`-A`（`--accession`）和 `-T`（`--tsv`）必须二选一，不能同时使用，用于指定要下载的数据源。
 
 ### b. 使用示例
 

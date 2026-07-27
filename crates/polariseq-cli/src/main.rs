@@ -1,7 +1,6 @@
 use anyhow::{anyhow, Context, Result};
 use chrono::Local;
-use clap::Parser;
-use clap::Subcommand;
+use clap::{ArgGroup, Parser, Subcommand};
 use csv::WriterBuilder;
 use indicatif::{HumanBytes, MultiProgress, ProgressBar};
 use regex::Regex;
@@ -133,6 +132,15 @@ enum Commands {
 // ============================================================
 
 #[derive(Parser, Debug)]
+#[command(
+    arg_required_else_help = true,
+    group(
+        ArgGroup::new("input")
+            .required(true)
+            .multiple(false)
+            .args(["accession", "tsv"])
+    )
+)]
 struct DownloadArgs {
     #[arg(
         short = 'A',
@@ -385,6 +393,7 @@ struct Md5VerifyArgs {
 // ============================================================
 
 #[derive(Parser, Debug)]
+#[command(arg_required_else_help = true)]
 struct UploadArgs {
     #[arg(
         short,
@@ -401,7 +410,15 @@ struct UploadArgs {
         help_heading = "S3 Options"
     )]
     prefix: Option<String>,
-    #[arg(short = 'f', long, num_args = 1.., value_name = "FILE", help = "Files to upload", help_heading = "S3 Options")]
+    #[arg(
+        short = 'f',
+        long,
+        required = true,
+        num_args = 1..,
+        value_name = "FILE",
+        help = "Files to upload",
+        help_heading = "S3 Options"
+    )]
     files: Vec<PathBuf>,
 
     #[arg(
@@ -449,6 +466,7 @@ struct UploadArgs {
 // ============================================================
 
 #[derive(Parser, Debug)]
+#[command(arg_required_else_help = true)]
 struct DepsArgs {
     #[command(subcommand)]
     command: DepsSubcommand,
@@ -684,6 +702,10 @@ async fn check_network_health() {
     info!("Network check done — proceeding");
 }
 
+fn needs_network_health_check(command: &Commands) -> bool {
+    matches!(command, Commands::Download(_))
+}
+
 #[tokio::main]
 async fn main() -> ExitCode {
     let cli = Cli::parse();
@@ -765,10 +787,7 @@ async fn main() -> ExitCode {
         }
     }
 
-    if !matches!(
-        &cli.command,
-        Commands::PublicData(_) | Commands::Validate(_) | Commands::Md5(_)
-    ) {
+    if needs_network_health_check(&cli.command) {
         check_network_health().await;
     }
 
@@ -2107,5 +2126,91 @@ mod tests {
         assert_eq!(visible_conversion_bytes(100, 100), 99);
         assert_eq!(visible_conversion_bytes(200, 100), 99);
         assert_eq!(visible_conversion_bytes(10, 0), 0);
+    }
+
+    #[test]
+    fn empty_subcommands_show_their_help() {
+        for command in [
+            "download",
+            "public-data",
+            "validate",
+            "md5",
+            "upload",
+            "deps",
+        ] {
+            let error = Cli::try_parse_from(["polariseq", command])
+                .expect_err("an empty subcommand should display its help");
+            assert!(
+                matches!(
+                    error.kind(),
+                    clap::error::ErrorKind::DisplayHelp
+                        | clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+                ),
+                "{command}: {:?}",
+                error.kind()
+            );
+        }
+    }
+
+    #[test]
+    fn download_requires_one_input_source() {
+        let missing = Cli::try_parse_from(["polariseq", "download", "-o", "out"])
+            .expect_err("download should require an input source");
+        assert_eq!(
+            missing.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
+
+        let conflicting = Cli::try_parse_from([
+            "polariseq",
+            "download",
+            "-o",
+            "out",
+            "-A",
+            "PRJNA1",
+            "-T",
+            "runs.tsv",
+        ])
+        .expect_err("download input sources should be mutually exclusive");
+        assert_eq!(conflicting.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn upload_requires_files() {
+        let error = Cli::try_parse_from(["polariseq", "upload", "-b", "bucket"])
+            .expect_err("upload should require at least one file");
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
+    }
+
+    #[test]
+    fn network_health_check_is_limited_to_download() {
+        let download = Cli::try_parse_from([
+            "polariseq",
+            "download",
+            "-o",
+            "out",
+            "-A",
+            "PRJNA1",
+        ])
+        .expect("download arguments should parse");
+        assert!(needs_network_health_check(&download.command));
+
+        let upload = Cli::try_parse_from([
+            "polariseq",
+            "upload",
+            "-b",
+            "bucket",
+            "-f",
+            "reads.fastq.gz",
+        ])
+        .expect("upload arguments should parse");
+        assert!(!needs_network_health_check(&upload.command));
+
+        let deps = Cli::try_parse_from(["polariseq", "deps", "list"])
+            .expect("deps arguments should parse");
+        assert!(!needs_network_health_check(&deps.command));
     }
 }
