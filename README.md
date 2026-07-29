@@ -450,6 +450,44 @@ A circular **theme toggle button** in the top-right corner of the header switche
 
 Folder sources use `exclude` first and then `include` as an override. For example, `exclude: "*"` together with `include: "nt.*"` downloads only `nt.*` objects below the configured S3 prefix. Plain 32-hex S3 ETags are verified as MD5 values; other object types retain size and completed-range checks. Each completed database also writes `<name>.md5`, an `md5sum`-compatible manifest containing every downloaded file. Each object uses its own `.meta.json` file for resumable transfer; it is removed when the download completes.
 
+#### c. NCBI Genome Packages
+
+`ncbi-download` downloads assembly files directly from the matching NCBI FTP directory. The default set is genome FASTA, GTF, GFF3, Gene Ontology GAF, protein FASTA, assembly report, and assembly statistics. The assembly accession must be a versioned `GCA_...` or `GCF_...` identifier.
+
+```bash
+# Download the five default compressed files into ./GCF_004799145.2
+./target/release/polariseq ncbi-download GCF_004799145.2
+
+# Download two assemblies concurrently (each accession gets its own directory)
+./target/release/polariseq ncbi-download GCF_902201215.1 GCF_002162155.1 -p 2
+
+# Select a smaller file set explicitly
+./target/release/polariseq ncbi-download GCF_004799145.2 \
+  --include genome-fasta \
+  --include genome-gff \
+  --include prot-fasta \
+  --output ./genomes/GCF_004799145.2
+
+# Use an API key from the environment for the assembly lookup
+NCBI_API_KEY=YOUR_KEY ./target/release/polariseq ncbi-download GCA_000001405.29
+```
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| Positional `ACCESSION` | One or more versioned NCBI assembly accessions (`GCA_...` or `GCF_...`) | — |
+| `-o`, `--output` | Download directory; with multiple accessions, each uses an accession subdirectory | `./<ACCESSION>` |
+| `-p`, `--multithreads` | Concurrent assembly downloads | `2` |
+| `-i`, `--include` | File type to download; repeat to request multiple types | genome FASTA, GTF, GFF, GO GAF, protein FASTA, assembly reports |
+| `--api-key` | NCBI API key; may also be set with `NCBI_API_KEY` | — |
+
+Available `--include` values are `genome-fasta`, `genome-gtf`, `genome-gff`, `gene-ontology`, `rna-fasta`, `cds-fasta`, `prot-fasta`, `sequence-report`, `assembly-report`, and `assembly-stats`.
+
+The default download set contains `*_genomic.fna.gz`, `*_genomic.gtf.gz`, `*_genomic.gff.gz`, `*_gene_ontology.gaf.gz`, `*_protein.faa.gz`, `*_assembly_report.txt`, and `*_assembly_stats.txt`.
+
+Annotation releases vary by assembly. If an optional default or explicitly requested file is absent from the NCBI FTP directory, Polariseq logs a warning and downloads the remaining available files. It fails only when none of the requested files are available for an assembly.
+
+For every assembly, Polariseq also saves NCBI's `md5checksums.txt` into the output directory, selects checksums for the files requested in that run, and verifies each downloaded file before reporting success. A missing checksum or MD5 mismatch fails that assembly download.
+
 ##### Verifying downloaded BLAST databases
 
 For `ncbi_nt` and `ncbi_nr`, Polariseq already validates every volume with `blastdbcmd -info` during the download and retries corrupted volumes automatically. After the download finishes, you can also run a manual integrity check with NCBI's own tools or with the built-in `validate` subcommand.

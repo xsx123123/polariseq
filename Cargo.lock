@@ -3761,6 +3761,7 @@ dependencies = [
  "chrono",
  "clap",
  "csv",
+ "futures-util",
  "hex",
  "indicatif",
  "md5",

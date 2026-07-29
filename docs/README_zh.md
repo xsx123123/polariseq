@@ -435,6 +435,7 @@ polariseq <command> [options]
 |--------|------|
 | `download` | 从 EBI ENA / NCBI SRA 下载测序数据（原有功能） |
 | `public-data` | 从 YAML 配置的公开 S3 bucket 下载参考数据库（支持分片续传） |
+| `ncbi-download` | 从 NCBI FTP 目录下载指定组装版本的基因组与注释文件 |
 | `upload` | 上传测序数据至 AWS S3 用于 NCBI SRA 提交（新功能） |
 
 **注意**：如果你之前使用的是扁平化命令格式（如 `Polariseq -A PRJNA1251654 -o ./data`），现在需要添加 `download` 子命令：
@@ -451,7 +452,47 @@ polariseq download -A PRJNA1251654 -o ./data -d aws
 
 ---
 
-## 8. 公共参考数据库下载
+## 8. NCBI 基因组数据包下载
+
+`ncbi-download` 会从对应的 NCBI FTP 组装目录直接下载文件。默认下载基因组 FASTA、GTF、GFF3、Gene Ontology GAF、蛋白 FASTA、组装报告和组装统计信息。组装版本号必须为带版本号的 `GCA_...` 或 `GCF_...` 格式。
+
+```bash
+# 默认下载五个压缩文件，输出至 ./GCF_004799145.2
+polariseq ncbi-download GCF_004799145.2
+
+# 并发下载两个组装版本；每个 accession 使用独立子目录
+polariseq ncbi-download GCF_902201215.1 GCF_002162155.1 -p 2
+
+# 显式选择较小的下载集合
+polariseq ncbi-download GCF_004799145.2 \
+  --include genome-fasta \
+  --include genome-gff \
+  --include prot-fasta \
+  --output ./genomes/GCF_004799145.2
+
+# 使用环境变量中的 API Key 查询组装信息
+NCBI_API_KEY=YOUR_KEY polariseq ncbi-download GCA_000001405.29
+```
+
+| 参数 | 说明 | 默认值 |
+|------|------|--------|
+| `ACCESSION` | 一个或多个带版本号的 NCBI 组装版本号（`GCA_...` 或 `GCF_...`） | — |
+| `-o`, `--output` | 压缩文件下载输出目录；多个 accession 时会分别放入对应子目录 | `./<ACCESSION>` |
+| `-p`, `--multithreads` | 并发下载的组装版本数量 | `2` |
+| `-i`, `--include` | 要下载的文件类型；可重复传入多个值 | 基因组 FASTA、GTF、GFF、GO GAF、蛋白 FASTA、组装报告 |
+| `--api-key` | NCBI API Key；也可通过 `NCBI_API_KEY` 设置 | — |
+
+`--include` 可选值：`genome-fasta`、`genome-gtf`、`genome-gff`、`gene-ontology`、`rna-fasta`、`cds-fasta`、`prot-fasta`、`sequence-report`、`assembly-report`、`assembly-stats`。
+
+默认下载集合为：`*_genomic.fna.gz`、`*_genomic.gtf.gz`、`*_genomic.gff.gz`、`*_gene_ontology.gaf.gz`、`*_protein.faa.gz`、`*_assembly_report.txt` 和 `*_assembly_stats.txt`。
+
+不同组装的注释发布内容可能不同。若 NCBI FTP 目录中缺少某个默认或通过 `--include` 指定的文件，Polariseq 会记录 `WARN` 并继续下载其余可用文件；只有该组装没有任何所请求文件时才会报错。
+
+每个组装还会下载并保留 NCBI 的 `md5checksums.txt`。Polariseq 会从中提取本次请求文件的 MD5，使用 `md5 verify` 相同的校验逻辑验证每个已下载文件；清单缺少对应 MD5 或校验不一致都会使该组装下载失败。
+
+---
+
+## 9. 公共参考数据库下载
 
 `public-data` 从 `polariseq.yaml` 的 `public_data` 配置中读取公开 S3 数据库。`folder` 类型会列举并按 `exclude` / `include` 通配符过滤前缀下的对象；`file` 类型下载单个对象。下载使用匿名 S3 列举和 HTTP Range 分片续传，不执行 EBI/NCBI API 健康检查。对于标准 32 位十六进制 S3 ETag，程序会作为 MD5 进行远端一致性校验；其他对象仍执行分片完成和对象大小校验。每个数据库下载完成后会生成 `<数据库标识>.md5`，其中包含该次下载全部文件的 md5sum 兼容校验值；每个目标文件都会保留独立的 `.meta.json` 进度文件，重新运行相同命令即可继续未完成下载。
 
@@ -533,7 +574,7 @@ polariseq public-data --name ncbi_nt --dry-run
 
 ---
 
-## 9. HTTP 进度 API（加密）
+## 10. HTTP 进度 API（加密）
 
 Polariseq CLI 提供可选的 **HTTP 进度 API**，允许外部平台实时查询下载进度。进度数据使用 **AES-256-GCM** 加密以确保安全。
 

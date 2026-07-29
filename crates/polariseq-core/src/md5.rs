@@ -21,8 +21,7 @@ pub fn compute_md5(path: &Path) -> Result<String> {
 /// Compute the MD5 hex digest of a single file, reporting bytes read to an
 /// optional progress bar.
 pub fn compute_md5_with_progress(path: &Path, progress: Option<&ProgressBar>) -> Result<String> {
-    let file = File::open(path)
-        .with_context(|| format!("Failed to open {}", path.display()))?;
+    let file = File::open(path).with_context(|| format!("Failed to open {}", path.display()))?;
     let mut reader = BufReader::new(file);
     let mut ctx = md5::Context::new();
     let mut buf = vec![0u8; 1024 * 1024];
@@ -193,7 +192,10 @@ pub async fn generate_md5_manifest(
     } else if target.is_dir() {
         (collect_files(target)?, Some(target))
     } else {
-        return Err(anyhow!("Target {} is neither a file nor a directory", target.display()));
+        return Err(anyhow!(
+            "Target {} is neither a file nor a directory",
+            target.display()
+        ));
     };
 
     // Never hash the manifest we are about to (over)write: an existing output
@@ -208,7 +210,11 @@ pub async fn generate_md5_manifest(
         return Ok(());
     }
 
-    info!("Computing MD5 for {} file(s) using {} thread(s)", files.len(), threads.max(1));
+    info!(
+        "Computing MD5 for {} file(s) using {} thread(s)",
+        files.len(),
+        threads.max(1)
+    );
 
     let semaphore = Arc::new(Semaphore::new(threads.max(1)));
     let mut handles = Vec::with_capacity(files.len());
@@ -217,10 +223,7 @@ pub async fn generate_md5_manifest(
         let semaphore = semaphore.clone();
         let progress = progress.clone();
         handles.push(tokio::spawn(async move {
-            let _permit = semaphore
-                .acquire()
-                .await
-                .expect("md5 semaphore closed");
+            let _permit = semaphore.acquire().await.expect("md5 semaphore closed");
             let pb = progress
                 .as_ref()
                 .map(|mp| new_hash_bar(mp, &file, "Hashing"));
@@ -247,8 +250,8 @@ pub async fn generate_md5_manifest(
 
     results.sort_by(|a, b| a.0.cmp(&b.0));
 
-    let mut manifest = File::create(output)
-        .with_context(|| format!("Failed to create {}", output.display()))?;
+    let mut manifest =
+        File::create(output).with_context(|| format!("Failed to create {}", output.display()))?;
     for (file, md5) in &results {
         writeln!(manifest, "{}  {}", md5, manifest_entry_name(file, base))
             .with_context(|| format!("Failed to write to {}", output.display()))?;
@@ -328,10 +331,28 @@ pub async fn verify_md5_manifest(
         return Ok((0, 0));
     }
 
+    verify_md5_entries(entries, root_dir, threads, progress).await
+}
+
+/// Verify a selected set of md5sum-compatible entries against files in
+/// `root_dir`.
+///
+/// This is the same verification path used by [`verify_md5_manifest`], for
+/// callers that need to validate only a subset of a larger manifest.
+pub async fn verify_md5_entries(
+    entries: Vec<(String, String)>,
+    root_dir: &Path,
+    threads: usize,
+    progress: Option<Arc<MultiProgress>>,
+) -> Result<(usize, usize)> {
+    if entries.is_empty() {
+        warn!("No MD5 entries were selected for verification");
+        return Ok((0, 0));
+    }
+
     info!(
-        "Verifying {} file(s) from {} using {} thread(s)",
+        "Verifying {} file(s) using {} thread(s)",
         entries.len(),
-        md5_path.display(),
         threads.max(1)
     );
 
@@ -343,10 +364,7 @@ pub async fn verify_md5_manifest(
         let semaphore = semaphore.clone();
         let progress = progress.clone();
         handles.push(tokio::spawn(async move {
-            let _permit = semaphore
-                .acquire()
-                .await
-                .expect("md5 semaphore closed");
+            let _permit = semaphore.acquire().await.expect("md5 semaphore closed");
 
             if !file_path.exists() {
                 return Ok::<_, anyhow::Error>((filename, expected_md5, None));
@@ -420,8 +438,10 @@ mod tests {
         assert!(t.contains('…'), "{t}");
 
         // Same-species files sharing a long prefix must stay distinguishable.
-        let sibling =
-            truncated_middle("Zea_mays.Zm-B73-REFERENCE-NAM-5.0.63.gff3.gz", HASH_PREFIX_WIDTH);
+        let sibling = truncated_middle(
+            "Zea_mays.Zm-B73-REFERENCE-NAM-5.0.63.gff3.gz",
+            HASH_PREFIX_WIDTH,
+        );
         assert_ne!(t, sibling, "chr.gff3 and gff3 must not look identical");
     }
 

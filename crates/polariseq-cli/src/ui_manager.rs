@@ -21,7 +21,7 @@ use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use tokio::task::JoinHandle;
 
 use polariseq_core::observer::{CompletedInfo, DownloadObserver};
-use polariseq_core::progress::phase_bar_style;
+use polariseq_core::progress::{phase_bar_style, transfer_bar_style};
 use polariseq_core::progress_store::{ProgressStore, RunStage};
 
 /// Window used for the smoothed aggregate speed on the status bar.
@@ -113,6 +113,26 @@ impl UiManager {
         pb
     }
 
+    /// Create a transient network-transfer bar using the same layout as the
+    /// main SRA `download` command. It stays immediately above the shared
+    /// bottom status bar and is cleared when the file finishes.
+    pub fn transfer_bar(&self, id: &str, total_bytes: u64) -> ProgressBar {
+        let pb = self
+            .mp
+            .insert_from_back(1, ProgressBar::new(total_bytes.max(1)));
+        pb.set_style(transfer_bar_style());
+        pb.set_prefix(id.to_string());
+        pb.set_message("Downloading");
+        pb.enable_steady_tick(Duration::from_millis(100));
+        pb
+    }
+
+    /// Return the shared progress renderer for verification bars that should
+    /// remain above the pinned global status line.
+    pub fn multi_progress(&self) -> MultiProgress {
+        self.mp.clone()
+    }
+
     /// Stop the refresh loop and clear the status bar.
     pub fn stop(&self) {
         if let Some(handle) = self.tick_handle.lock().unwrap().take() {
@@ -134,12 +154,21 @@ impl UiManager {
         let now = Instant::now();
 
         // Sum live byte counters and the instantaneous speed.
-        let (sum_bytes, cur_total, active_from_live) = {
+        let (live_bytes, live_total, active_from_live) = {
             let live = self.live.lock().unwrap();
             let sum: u64 = live.iter().map(|c| c.bytes.load(Ordering::Relaxed)).sum();
             let total: u64 = live.iter().map(|c| c.total).sum();
             (sum, total, live.len())
         };
+        let completed_bytes: u64 = self
+            .completed
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|record| record.total_bytes)
+            .sum();
+        let sum_bytes = completed_bytes + live_bytes;
+        let cur_total = completed_bytes + live_total;
 
         // Sliding-window average over SPEED_WINDOW to avoid 100ms jitter.
         // Reset when the live sum drops (file finished/unregistered).

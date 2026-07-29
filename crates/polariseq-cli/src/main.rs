@@ -28,6 +28,7 @@ use polariseq_core::observer::DownloadObserver;
 use polariseq_core::*;
 
 mod http_server;
+mod ncbi_download;
 mod ui_manager;
 use ui_manager::{Mode, UiManager};
 
@@ -117,6 +118,8 @@ enum Commands {
     Download(DownloadArgs),
     /// Download public reference databases configured in YAML from S3
     PublicData(PublicDataArgs),
+    /// Download genome and annotation files from NCBI FTP
+    NcbiDownload(ncbi_download::NcbiDownloadArgs),
     /// Validate an existing BLAST database directory with blastdbcmd
     Validate(ValidateArgs),
     /// Generate or verify MD5 checksums for files and directories
@@ -713,6 +716,7 @@ async fn main() -> ExitCode {
     let output_dir = match &cli.command {
         Commands::Download(args) => args.output.clone(),
         Commands::PublicData(args) => args.output.clone(),
+        Commands::NcbiDownload(args) => args.output_dir_for(&args.accessions[0]),
         Commands::Validate(args) => args.dir.clone(),
         Commands::Md5(args) => match &args.command {
             Md5Subcommand::Generate(g) => g
@@ -728,6 +732,7 @@ async fn main() -> ExitCode {
     let download_output: Option<&Path> = match &cli.command {
         Commands::Download(args) => Some(args.output.as_path()),
         Commands::PublicData(args) => Some(args.output.as_path()),
+        Commands::NcbiDownload(_) => Some(output_dir.as_path()),
         Commands::Validate(args) => Some(args.dir.as_path()),
         Commands::Md5(args) => match &args.command {
             Md5Subcommand::Generate(g) => g.output.parent(),
@@ -750,6 +755,7 @@ async fn main() -> ExitCode {
         &cli.log_format,
         match &cli.command {
             Commands::Download(args) => args.accession.as_deref(),
+            Commands::NcbiDownload(args) => args.accessions.first().map(String::as_str),
             // md5 logs land next to the hashed data; the `md5` tag makes their
             // names match md5::MD5_LOG_PREFIX so hashing can skip them.
             Commands::Md5(_) => Some("md5"),
@@ -795,6 +801,7 @@ async fn main() -> ExitCode {
         match &cli.command {
             Commands::Download(args) => run_download(args, &cli).await,
             Commands::PublicData(args) => run_public_data(args, &cli).await,
+            Commands::NcbiDownload(args) => run_ncbi_download(args).await,
             Commands::Validate(args) => run_validate(args, &cli).await,
             Commands::Md5(args) => run_md5(args).await,
             Commands::Upload(args) => run_upload(args).await,
@@ -886,6 +893,21 @@ async fn run_public_data(args: &PublicDataArgs, cli: &Cli) -> Result<()> {
 
     info!("Public data download completed successfully!");
     Ok(())
+}
+
+async fn run_ncbi_download(args: &ncbi_download::NcbiDownloadArgs) -> Result<()> {
+    let ui = if GLOBAL_MP.is_hidden() {
+        None
+    } else {
+        BARS_ACTIVE.store(true, std::sync::atomic::Ordering::Relaxed);
+        Some(UiManager::start(GLOBAL_MP.clone(), Mode::PublicData, 0))
+    };
+    let result = ncbi_download::run(args, ui.clone()).await;
+    BARS_ACTIVE.store(false, std::sync::atomic::Ordering::Relaxed);
+    if let Some(ui) = ui {
+        ui.stop();
+    }
+    result
 }
 
 async fn run_validate(args: &ValidateArgs, cli: &Cli) -> Result<()> {
