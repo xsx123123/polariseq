@@ -1,6 +1,10 @@
 
 [中文文档](./docs/README_zh.md) | English
 
+<p align="center">
+  <img src="docs/极光星轨与DNA数据徽标.png" alt="极光星轨与 DNA 数据徽标" width="250">
+</p>
+
 # Polariseq
 
 > **Formerly EBIDownload.** Renamed to **Polariseq** (*Polaris* + *seq*) — inspired by the night sky and the North Star, a guide for navigating vast sequencing data.

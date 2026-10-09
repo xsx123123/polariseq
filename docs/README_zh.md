@@ -1,6 +1,10 @@
 
 [English](../README.md) | 中文文档
 
+<p align="center">
+  <img src="极光星轨与DNA数据徽标.png" alt="极光星轨与 DNA 数据徽标" width="250">
+</p>
+
 > **「我们由星尘构成。」**
 >
 > 我们只是借用了宇宙中的这些原子，短暂地体验了一次这个世界。
@@ -436,6 +440,7 @@ polariseq <command> [options]
 | `download` | 从 EBI ENA / NCBI SRA 下载测序数据（原有功能） |
 | `public-data` | 从 YAML 配置的公开 S3 bucket 下载参考数据库（支持分片续传） |
 | `ncbi-download` | 从 NCBI FTP 目录下载指定组装版本的基因组与注释文件 |
+| `gsa-download` | 从 GSA/NGDC 下载 CRA/CRR 测序数据 |
 | `upload` | 上传测序数据至 AWS S3 用于 NCBI SRA 提交（新功能） |
 
 **注意**：如果你之前使用的是扁平化命令格式（如 `Polariseq -A PRJNA1251654 -o ./data`），现在需要添加 `download` 子命令：
@@ -483,6 +488,23 @@ NCBI_API_KEY=YOUR_KEY polariseq ncbi-download GCA_000001405.29
 | `--api-key` | NCBI API Key；也可通过 `NCBI_API_KEY` 设置 | — |
 
 `--include` 可选值：`genome-fasta`、`genome-gtf`、`genome-gff`、`gene-ontology`、`rna-fasta`、`cds-fasta`、`prot-fasta`、`sequence-report`、`assembly-report`、`assembly-stats`。
+
+## 9. GSA 测序数据下载
+
+`gsa-download` 的默认输出目录使用第一个输入 accession 命名，便于直接识别数据来源。例如：
+
+```bash
+# 输出至 ./CRR1235475
+polariseq gsa-download CRR1235475
+
+# CRA 项目下载其下所有 Run，输出至 ./CRA017017
+polariseq gsa-download CRA017017
+
+# 也支持 Run 页 URL；URL 中的 CRR 会作为目录名
+polariseq gsa-download https://ngdc.cncb.ac.cn/gsa/browse/CRA017017/CRR1235475
+```
+
+使用 `-o/--output` 可以覆盖默认目录，例如 `-o ./gsa-data`。
 
 默认下载集合为：`*_genomic.fna.gz`、`*_genomic.gtf.gz`、`*_genomic.gff.gz`、`*_gene_ontology.gaf.gz`、`*_protein.faa.gz`、`*_assembly_report.txt` 和 `*_assembly_stats.txt`。
 
