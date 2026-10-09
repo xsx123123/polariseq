@@ -28,6 +28,7 @@ use polariseq_core::observer::DownloadObserver;
 use polariseq_core::*;
 
 mod http_server;
+mod gsa_download;
 mod ncbi_download;
 mod ui_manager;
 use ui_manager::{Mode, UiManager};
@@ -120,6 +121,8 @@ enum Commands {
     PublicData(PublicDataArgs),
     /// Download genome and annotation files from NCBI FTP
     NcbiDownload(ncbi_download::NcbiDownloadArgs),
+    /// Download sequencing data from GSA (NGDC CNCB) via FTP
+    GsaDownload(gsa_download::GsaDownloadArgs),
     /// Validate an existing BLAST database directory with blastdbcmd
     Validate(ValidateArgs),
     /// Generate or verify MD5 checksums for files and directories
@@ -717,6 +720,10 @@ async fn main() -> ExitCode {
         Commands::Download(args) => args.output.clone(),
         Commands::PublicData(args) => args.output.clone(),
         Commands::NcbiDownload(args) => args.output_dir_for(&args.accessions[0]),
+        Commands::GsaDownload(args) => args
+            .output
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("gsa_download")),
         Commands::Validate(args) => args.dir.clone(),
         Commands::Md5(args) => match &args.command {
             Md5Subcommand::Generate(g) => g
@@ -733,6 +740,7 @@ async fn main() -> ExitCode {
         Commands::Download(args) => Some(args.output.as_path()),
         Commands::PublicData(args) => Some(args.output.as_path()),
         Commands::NcbiDownload(_) => Some(output_dir.as_path()),
+        Commands::GsaDownload(_) => Some(output_dir.as_path()),
         Commands::Validate(args) => Some(args.dir.as_path()),
         Commands::Md5(args) => match &args.command {
             Md5Subcommand::Generate(g) => g.output.parent(),
@@ -756,6 +764,13 @@ async fn main() -> ExitCode {
         match &cli.command {
             Commands::Download(args) => args.accession.as_deref(),
             Commands::NcbiDownload(args) => args.accessions.first().map(String::as_str),
+            // GSA downloads log next to the resolved data; tag with the first
+            // accession (or "gsa" for the shared default directory).
+            Commands::GsaDownload(args) => args
+                .accessions
+                .first()
+                .map(String::as_str)
+                .or(Some("gsa")),
             // md5 logs land next to the hashed data; the `md5` tag makes their
             // names match md5::MD5_LOG_PREFIX so hashing can skip them.
             Commands::Md5(_) => Some("md5"),
@@ -802,6 +817,7 @@ async fn main() -> ExitCode {
             Commands::Download(args) => run_download(args, &cli).await,
             Commands::PublicData(args) => run_public_data(args, &cli).await,
             Commands::NcbiDownload(args) => run_ncbi_download(args).await,
+            Commands::GsaDownload(args) => run_gsa_download(args).await,
             Commands::Validate(args) => run_validate(args, &cli).await,
             Commands::Md5(args) => run_md5(args).await,
             Commands::Upload(args) => run_upload(args).await,
@@ -903,6 +919,21 @@ async fn run_ncbi_download(args: &ncbi_download::NcbiDownloadArgs) -> Result<()>
         Some(UiManager::start(GLOBAL_MP.clone(), Mode::PublicData, 0))
     };
     let result = ncbi_download::run(args, ui.clone()).await;
+    BARS_ACTIVE.store(false, std::sync::atomic::Ordering::Relaxed);
+    if let Some(ui) = ui {
+        ui.stop();
+    }
+    result
+}
+
+async fn run_gsa_download(args: &gsa_download::GsaDownloadArgs) -> Result<()> {
+    let ui = if GLOBAL_MP.is_hidden() {
+        None
+    } else {
+        BARS_ACTIVE.store(true, std::sync::atomic::Ordering::Relaxed);
+        Some(UiManager::start(GLOBAL_MP.clone(), Mode::PublicData, 0))
+    };
+    let result = gsa_download::run(args, ui.clone()).await;
     BARS_ACTIVE.store(false, std::sync::atomic::Ordering::Relaxed);
     if let Some(ui) = ui {
         ui.stop();

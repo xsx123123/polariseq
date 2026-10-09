@@ -3,6 +3,7 @@
 pub mod aws_s3;
 pub mod deps;
 pub mod ftp;
+pub mod gsa;
 pub mod md5;
 pub mod observer;
 pub mod progress;
