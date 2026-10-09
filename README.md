@@ -11,6 +11,22 @@ For GEO datasets, simply obtain the associated **BioProject ID** (e.g., `PRJNAxx
 
 By default, Polariseq utilizes **AWS S3 global acceleration** to achieve ultra-fast download speeds (comparable to IDM/Aspera). **It is capable of downloading 2TB of data from the SRA database to local storage within 24 hours**, while providing full support for **resumable downloads** and **MD5 integrity verification**. It also uses Rust-native parallel gzip compression (via the [`gzp`](https://crates.io/crates/gzp) crate with the `libdeflate` backend), eliminating the need to install external compression tools.
 
+## What's New in v1.4.3
+
+- **GSA data downloads (CLI)**: New `gsa-download` subcommand downloads sequencing data from GSA (NGDC CNCB) using CRA project accessions, CRR run accessions, or GSA browse URLs.
+
+```bash
+# Download a GSA run (default output: ./CRR1235475)
+./target/release/polariseq gsa-download CRR1235475
+
+# Download all runs in a GSA project to a specified directory
+./target/release/polariseq gsa-download CRA017017 -o ./gsa-data
+```
+
+![Polariseq GSA data download in the CLI](./docs/polariseq_GSA.png)
+
+*Supplementary screenshot: Polariseq v1.4.3 downloading GSA run CRR1235475 with live file progress and download speeds.*
+
 ## What's New in v1.4.2
 
 - **Renamed to Polariseq** (formerly **EBIDownload**): *Polaris* (North Star) + *seq* — a star-inspired name for a toolkit that helps you navigate sequencing data across ENA, SRA, GEO, and public S3 databases.
@@ -214,8 +230,8 @@ npm install
 npm run tauri build
 
 # 3. Output
-#   Intel Mac:    src-tauri/target/release/bundle/dmg/Polariseq_1.4.0_x64.dmg
-#   Apple Silicon: src-tauri/target/release/bundle/dmg/Polariseq_1.4.0_aarch64.dmg
+#   Intel Mac:    src-tauri/target/release/bundle/dmg/Polariseq_1.4.3_x64.dmg
+#   Apple Silicon: src-tauri/target/release/bundle/dmg/Polariseq_1.4.3_aarch64.dmg
 ```
 
 `sra-tools` will be installed automatically on first GUI launch if it is not found. If you prefer to use your own installation, create `polariseq.yaml` before running:
@@ -236,8 +252,8 @@ npm install
 npm run tauri build
 
 # 2. Output
-#    src-tauri\target\release\bundle\msi\Polariseq_1.4.0_x64_en-US.msi
-#    src-tauri\target\release\bundle\nsis\Polariseq_1.4.0_x64-setup.exe
+#    src-tauri\target\release\bundle\msi\Polariseq_1.4.3_x64_en-US.msi
+#    src-tauri\target\release\bundle\nsis\Polariseq_1.4.3_x64-setup.exe
 ```
 
 `sra-tools` will be installed automatically on first GUI launch if it is not found.
@@ -257,8 +273,8 @@ npm install
 npm run tauri build
 
 # 3. Output
-#    src-tauri/target/release/bundle/appimage/polariseq_1.4.0_amd64.AppImage
-#    src-tauri/target/release/bundle/deb/polariseq_1.4.0_amd64.deb
+#    src-tauri/target/release/bundle/appimage/polariseq_1.4.3_amd64.AppImage
+#    src-tauri/target/release/bundle/deb/polariseq_1.4.3_amd64.deb
 ```
 
 `sra-tools` will be installed automatically on first GUI launch if it is not found.
@@ -971,7 +987,7 @@ md5sum -c md5.txt
 
 ---
 
-**Author**: JZHANG | **Version**: v1.4.2
+**Author**: JZHANG | **Version**: v1.4.3
 
 ## 🔗 Links
 - GitHub: [repository](https://github.com/xsx123123/polariseq)

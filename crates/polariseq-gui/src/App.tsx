@@ -1527,7 +1527,7 @@ function AboutTab() {
           </svg>
         </div>
         <h1>Polariseq</h1>
-        <p className="about-version">Version 1.4.2</p>
+        <p className="about-version">Version 1.4.3</p>
         <p className="about-description">
           A high-performance tool for downloading sequencing data from ENA/SRA.
           Supports multiple protocols and automatic format conversion.
